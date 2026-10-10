@@ -5,7 +5,8 @@
 //! - `pick`: popup entrypoint; the searchable list. `pick --print` just prints
 //!   the chosen path, which needs no running Herdr.
 //! - `on-pane-created`: event hook; opens the picker for a new split when
-//!   `auto_trigger` is on (off by default, see docs/INTEGRATION.md).
+//!   `auto_trigger` is on (off by default, see docs/INTEGRATION.md). The
+//!   project then opens in a further split; the new pane is left untouched.
 
 mod config;
 mod handoff;
@@ -13,7 +14,7 @@ mod picker;
 mod trigger;
 
 use config::{Config, CONFIG_FILE};
-use handoff::{Herdr, HerdrCli, Mode};
+use handoff::{Herdr, HerdrCli};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -69,12 +70,7 @@ fn load_config() -> Result<Config, String> {
 }
 
 fn open() -> Result<(), String> {
-    handoff::open_popup(
-        &herdr(),
-        &env("HERDR_PLUGIN_ID")?,
-        Mode::Split,
-        &env("HERDR_PANE_ID")?,
-    )
+    handoff::open_popup(&herdr(), &env("HERDR_PLUGIN_ID")?, &env("HERDR_PANE_ID")?)
 }
 
 fn on_pane_created() -> Result<(), String> {
@@ -93,25 +89,16 @@ fn on_pane_created() -> Result<(), String> {
     ])?;
     let panes = trigger::listed_panes(&listing).ok_or("unreadable `pane list` output")?;
     if trigger::decide(&created, &panes) == trigger::Decision::Open {
-        handoff::open_popup(
-            &herdr,
-            &env("HERDR_PLUGIN_ID")?,
-            Mode::Replace,
-            &created.pane_id,
-        )?;
+        handoff::open_popup(&herdr, &env("HERDR_PLUGIN_ID")?, &created.pane_id)?;
     }
     Ok(())
 }
 
 fn pick(print_only: bool) -> Result<(), String> {
-    let (mode, pane) = if print_only {
-        (Mode::Split, String::new())
+    let pane = if print_only {
+        String::new()
     } else {
-        let mode = env(handoff::ENV_MODE)?;
-        (
-            Mode::parse(&mode).ok_or(format!("unknown picker mode {mode:?}"))?,
-            env(handoff::ENV_PANE)?,
-        )
+        env(handoff::ENV_PANE)?
     };
     let config = match load_config() {
         Ok(config) => config,
@@ -130,9 +117,9 @@ fn pick(print_only: bool) -> Result<(), String> {
         println!("{}", project.path.display());
         return Ok(());
     }
-    match handoff::open_project(&herdr(), mode, &pane, &project.path, config.direction) {
+    match handoff::open_project(&herdr(), &pane, &project.path, config.direction) {
         Ok(()) => Ok(()),
-        Err(err) => pause(&err.to_string()),
+        Err(message) => pause(&message),
     }
 }
 
