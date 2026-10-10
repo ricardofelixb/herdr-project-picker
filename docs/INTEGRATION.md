@@ -34,7 +34,9 @@ a user split. What the hook can see is used as a heuristic
 3. Skip panes that already have an `agent`.
 4. Require `focused: true`. The keybinding split focuses the new pane, while
    `herdr pane split` leaves focus alone unless `--focus` is passed, so most
-   automated splits are skipped.
+   automated splits are skipped. The picker's own splits rely on this: it
+   creates them with `--no-focus`, otherwise its project split would look like
+   a user split and reopen the picker.
 5. Skip the first pane of a tab: ask `herdr pane list --workspace <id>` and
    skip unless the tab has a pane with a **lower number**. Comparing numbers
    (instead of counting panes) keeps a new tab's first pane out even if it was
@@ -59,25 +61,33 @@ Herdr has no method that changes an existing pane's directory
 shell with `pane run` / `send-text`, which the plugin refuses to do: quoting is
 shell-specific (bash, zsh, fish, PowerShell, cmd) and the shell may be busy.
 
-What it does instead:
+What it does instead, for both the manual action and the automatic trigger:
 
-- **Manual action (Mode `split`)**: `herdr pane split --pane <focused>
-  --direction <right|down> --cwd <project> --focus`. The shell is launched
-  *in* the project, so there is no handoff to a running shell at all.
-- **Automatic trigger (Mode `replace`)**: the new split's shell already exists,
-  so the plugin swaps it. Immediately before acting it checks that the pane has
-  no agent and no label and that `pane process-info` shows exactly one
-  foreground process, the shell itself. If anything is missing or unclear it
-  changes nothing and shows why. Then it creates the replacement split with
-  `--cwd` first and closes the old pane only if that succeeded. The popup is
-  session-modal, so nothing can be typed into the pane while it is open.
+- `herdr pane split --pane <pane> --direction <right|down> --cwd <project>
+  --no-focus`, then `herdr pane focus --direction <same> --pane <pane>`. The
+  shell is launched *in* the project, so there is no handoff to a running
+  shell at all, and no existing pane is typed into, restarted or closed.
+  `--cwd` is passed to Herdr's server process, so configured roots and
+  projects must be absolute (`~` is expanded); relative ones are rejected.
+- The split is created unfocused so the event hook cannot mistake it for a
+  user split (see section 1). Herdr 0.9.3 has no way to focus a pane by id
+  (`pane focus` takes only a direction), so focus moves to the split's
+  neighbor in the split direction. If that call fails the project is still
+  open; only the focus is left where it was.
 - **Escape / Ctrl-C** exit without any Herdr call.
 
-**Smallest upstream extension for a true in-place handoff:** a method to
+**Not possible safely in 0.9.3: replacing the new split's own shell.** With the
+automatic trigger the new split keeps its (empty) shell and the project opens
+in a further split beside it; the user closes the extra pane. An earlier draft
+closed the new pane after checking that its shell was the only foreground
+process, but that does not prove idleness: a shell running a builtin such as
+`read` is its own foreground process, so a busy shell would have been closed.
+No API reports "at a prompt".
+
+**Smallest upstream extensions for a true in-place handoff:** a method to
 (re)start the shell of an idle pane in a directory, such as
 `pane respawn <pane> --cwd PATH`, or a `cwd` that a `pane.created` hook can
-supply before the shell starts. Then `replace` becomes one call and never
-closes a pane.
+supply before the shell starts; plus focusing a pane by id.
 
 ## 3. Popup and rendering
 
@@ -86,8 +96,10 @@ program (crossterm, alternate screen, blocking reads: no polling) in a
 `placement = "popup"` pane. Popups are session-modal, have no pane id, emit no
 pane lifecycle events and receive all input including Escape
 (`plugins.mdx`). The popup is opened with `herdr plugin pane open` through
-`HERDR_BIN_PATH`. The mode and target pane are passed as `HERDR_PICKER_MODE` /
-`HERDR_PICKER_PANE` because a popup process gets no `HERDR_PANE_ID`. Opening can
+`HERDR_BIN_PATH`. The target pane is passed as `HERDR_PICKER_PANE` because a
+popup process gets no `HERDR_PANE_ID`. Directory names are printed with control
+characters escaped, so a name holding terminal escape codes cannot rewrite the
+popup; the real path is still what is handed to Herdr. Opening can
 fail with `ui_busy` when another Herdr modal is active; the error is then
 only in the plugin command log (`herdr plugin log list`).
 
@@ -99,9 +111,12 @@ Checked on this machine (Windows, without Herdr involvement):
   search, plus a manifest contract test.
 - `cargo clippy --all-targets` and `cargo fmt --check`.
 - The release binary against a fake `HERDR_BIN_PATH` script: the exact Herdr
-  CLI arguments for the manual action and the auto trigger (split opens the
-  popup; a new tab's first pane and a `tab_created` event do not; the trigger
-  is inert without `auto_trigger`).
+  CLI arguments for the manual action and the auto trigger (a focused split
+  opens the popup; an unfocused split, a new tab's first pane and a
+  `tab_created` event do not; the trigger is inert without `auto_trigger`),
+  and a relative root being rejected. The project split's own arguments
+  (`--no-focus`, then `pane focus --direction`) are covered by unit tests
+  with a mock only, since the popup UI needs a terminal.
 - The popup UI drawing its list in a real console (`pick --print`).
 
 **Unproven, needs a live Herdr:**
@@ -112,8 +127,7 @@ Checked on this machine (Windows, without Herdr involvement):
    extension-less `target/release/herdr-project-picker` to the `.exe`.
 4. That a keybinding split really arrives with `focused: true`, that session
    restore emits no `pane.created`, and the heuristic's false positives.
-5. `pane split --focus` and `pane close` called from inside an open popup, and
-   the resulting layout of the `replace` handoff.
-6. `pane process-info` reporting the foreground process on Windows (when it
-   does not, `replace` refuses, which is the safe outcome).
-7. `--env` reaching the popup process.
+5. `pane split --no-focus` and `pane focus --direction` called from inside an
+   open popup, including that the focus move lands on the new split and that
+   the unfocused split's `pane.created` event reports `focused: false`.
+6. `--env` reaching the popup process.

@@ -19,14 +19,19 @@ inside a live Herdr yet; see [Validation](#validation) and
   paths and no dependency on any other tool.
 - **Safe handoff**: the project reaches the shell only through
   `herdr pane split --cwd <project>`, which starts a *new* shell in that folder.
-  The plugin never types into a shell (`pane run`, `send-text` and `send-keys`
-  are not used).
+  The plugin never types into, restarts or closes an existing pane (`pane run`,
+  `send-text`, `send-keys` and `pane close` are not used).
+- **Paths must be absolute** (`~` is expanded). Herdr resolves the folder in
+  its own process, so a relative path would open the wrong place; relative
+  entries are rejected with an error.
 - **Automatic trigger for new splits** is implemented but **off by default**
   (`auto_trigger = false`). Herdr 0.9.3 gives the `pane.created` event no
   origin, so the plugin can only guess that a pane is a user split, never
-  prove it. New tabs are never intended to trigger it. The precise blocker
-  and the smallest upstream change are in
-  [docs/INTEGRATION.md](docs/INTEGRATION.md).
+  prove it. New tabs are never intended to trigger it. When it fires, the
+  new split keeps its own empty shell and the project opens in a further
+  split beside it: Herdr 0.9.3 offers no safe way to replace or re-enter the
+  new pane's shell. The precise blocker and the smallest upstream changes are
+  in [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## Requirements
 
@@ -49,7 +54,7 @@ Create `config.toml` in the plugin config directory
 (`herdr plugin config-dir local.project-picker`):
 
 ```toml
-roots = ["~/projects"]   # each subfolder is a project
+roots = ["~/projects"]   # each subfolder is a project; absolute or ~/...
 projects = []            # folders that are projects themselves
 direction = "right"      # or "down"
 auto_trigger = false     # see docs/INTEGRATION.md before enabling

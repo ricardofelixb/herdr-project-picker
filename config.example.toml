@@ -1,7 +1,8 @@
 # Copy to the plugin config directory as config.toml:
 #   herdr plugin config-dir local.project-picker
-# Paths may start with "~". Nothing is assumed: with no roots or projects the
-# picker just shows where to put this file.
+# Paths must be absolute or start with "~"; relative paths are rejected because
+# Herdr resolves them in its own process. Nothing is assumed: with no roots or
+# projects the picker just shows where to put this file.
 
 # Folders whose direct, non-hidden subfolders are listed as projects.
 roots = ["~/projects"]
