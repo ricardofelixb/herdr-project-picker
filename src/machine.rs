@@ -124,11 +124,10 @@ pub fn load(
     if let Some(id) = id {
         let mut rows = known?;
         let mut note = None;
-        let roots = config
-            .machines
-            .get(id)
-            .or(config.machines.get(&machine.label));
-        if let Some(roots) = roots {
+        let roots = (config.machines.get(id))
+            .or(config.machines.get(&machine.label))
+            .unwrap_or(&config.shared);
+        if !roots.is_empty() {
             match list_remote(herdr, machine, roots) {
                 Ok((expanded, found)) => {
                     rows.retain(|row| !expanded.iter().any(|root| holds(&row.path, root)));
@@ -140,8 +139,7 @@ pub fn load(
         let rows = merge(rows);
         if rows.is_empty() && note.is_none() {
             note = Some(format!(
-                "No projects on {}.\nAdd [machines.{}] roots in {}",
-                machine.label,
+                "No projects on {}.\nAdd its roots in {}",
                 machine.label,
                 config_file.display()
             ));
@@ -174,9 +172,10 @@ pub fn load(
 }
 
 /// Run by `sh` on a saved machine, with the roots as arguments: prints each
-/// root as that machine expands `~`, then its non-hidden subfolders. It holds
-/// no single quote, because it travels inside one.
-const LIST_SCRIPT: &str = r#"for r in "$@"; do case $r in "~") r=$HOME ;; "~/"*) r=$HOME/${r#"~/"} ;; esac; printf "root\t%s\n" "$r"; for d in "$r"/*/; do [ -d "$d" ] && printf "dir\t%s\n" "${d%/}"; done; done; true"#;
+/// root that exists there, as the file system spells it (`~` expanded, links
+/// and a case-insensitive Mac's spelling resolved), then its non-hidden
+/// subfolders. It holds no single quote, because it travels inside one.
+const LIST_SCRIPT: &str = r#"for r in "$@"; do case $r in "~") r=$HOME ;; "~/"*) r=$HOME/${r#"~/"} ;; esac; cd -P -- "$r" 2>/dev/null || continue; r=$(/bin/pwd -P); printf "root\t%s\n" "$r"; for d in "$r"/*/; do [ -d "$d" ] && printf "dir\t%s\n" "${d%/}"; done; done; true"#;
 
 /// Lists `roots` on a saved machine over SSH, read-only. Returns the roots as
 /// that machine expanded them, and the absolute folders found under them.
@@ -347,6 +346,19 @@ mod tests {
         unknown.target = None;
         let loaded = load(&unknown, &mock, &config, Path::new("config.toml")).unwrap();
         assert!(loaded.note.unwrap().contains("no SSH target"));
+    }
+
+    #[test]
+    fn a_saved_machine_without_its_own_roots_lists_the_shared_ones() {
+        let mock = Mock::default()
+            .reply("--machine prof-b api snapshot", Ok(&snapshot("/root")))
+            .reply("ssh orgo", Ok("root\t/root/src\ndir\t/root/src/api\n"));
+        let mut config = here();
+        config.shared = vec!["~/src".into()];
+        let loaded = load(&orgo(), &mock, &config, Path::new("config.toml")).unwrap();
+        let paths: Vec<_> = loaded.rows.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(paths, ["/root/src/api"]);
+        assert!(mock.calls()[1][2].ends_with("' sh '~/src'"));
     }
 
     #[test]

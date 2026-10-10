@@ -60,13 +60,22 @@ checkout of every open workspace. Snapshots describe open sessions, not every
 project on disk, and Herdr's own panes usually sit in the home folder, so each
 machine also lists configured roots:
 
-- **Current**: `roots`/`projects`, read from the local disk.
-- **Saved machine**: `[machines.<label or id>] roots`, listed read-only with
+- **Current**: `roots`/`projects`, read from the local disk. An entry that
+  is absolute only on another system (a drive path on Unix, `/...` on
+  Windows) is skipped, so one file can be synced to every machine; a truly
+  relative entry is still an error. Unix roots are canonicalized
+  (`realpath`), so a case-insensitive Mac's `~/projects` matches the
+  `~/Projects` Herdr reports; Windows keeps them as written, since its
+  canonical form is a `\\?\` path.
+- **Saved machine**: `[machines.<label or id>] roots`, or else the top-level
+  roots written as `~`, `~/...` or `/...`, listed read-only with
   `ssh -o BatchMode=yes -o ConnectTimeout=10 -- <Herdr's saved target>
   "sh -c '<script>' sh '<root>'..."`, bounded like every other call. Herdr has
   no API that lists folders on another machine, and a plugin there could not
-  send its list back. The script prints each root as that machine expands
-  `~`, then the root's non-hidden subfolders. Roots are passed in single
+  send its list back. The script prints each root that exists there, as
+  `/bin/pwd -P` spells it after `cd` (the external `pwd` asks `getcwd`, which
+  returns a Mac's on-disk case; bash's builtin keeps the typed one), then the
+  root's non-hidden subfolders. Roots are passed in single
   quotes, so config parsing refuses quotes, control characters and anything
   but `/...`, `~` or `~/...`; a target that could read as an option or holds
   whitespace is dropped. A listing failure keeps the workspace folders and
