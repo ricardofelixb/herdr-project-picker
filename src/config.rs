@@ -24,7 +24,7 @@ impl Direction {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Folders whose direct, non-hidden subfolders are projects.
     pub roots: Vec<PathBuf>,
@@ -149,28 +149,35 @@ pub fn discover(config: &Config) -> Vec<Project> {
     projects
 }
 
+/// A scratch folder per test, removed on drop.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+pub mod tempdir {
+    use std::path::PathBuf;
 
-    struct TempDir(PathBuf);
+    pub struct TempDir(pub PathBuf);
 
     impl TempDir {
-        fn new(name: &str) -> TempDir {
+        pub fn new(name: &str) -> TempDir {
             let dir =
                 std::env::temp_dir().join(format!("herdr-picker-{}-{name}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
         }
     }
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tempdir::TempDir;
+    use super::*;
+    use std::fs;
 
     #[test]
     fn empty_config_is_safe_by_default() {

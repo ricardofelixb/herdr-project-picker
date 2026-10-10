@@ -1,18 +1,25 @@
 //! Herdr project picker plugin.
 //!
 //! Subcommands, wired up in `herdr-plugin.toml`:
-//! - `open`: action; opens the picker popup for a new split beside the focused pane.
-//! - `pick`: popup entrypoint; the searchable list. `pick --print` just prints
-//!   the chosen path, which needs no running Herdr.
+//! - `open`: action; opens the picker popup over the focused pane.
+//! - `pick`: popup entrypoint; machine tabs and a searchable project list.
+//!   `pick --print` prints the chosen path instead of opening it.
+//! - `bind-key --config PATH [--key prefix+f]`: adds the key to a Herdr config.
 
+mod bind;
 mod config;
 mod handoff;
+mod machine;
 mod picker;
+mod snapshot;
 
 use config::{Config, CONFIG_FILE};
-use handoff::HerdrCli;
+use handoff::{Herdr, HerdrCli};
+use machine::{Loaded, Machine};
+use picker::{Finish, LoadFn, OpenFn};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 const ENV_ROOTS: &str = "HERDR_PROJECT_PICKER_ROOTS";
 
@@ -21,15 +28,28 @@ fn main() -> ExitCode {
     let result = match args.next().as_deref() {
         Some("open") => open(),
         Some("pick") => pick(args.any(|arg| arg == "--print")),
-        _ => Err("usage: herdr-project-picker open | pick [--print]".into()),
+        Some("bind-key") => bind_key(args.collect()),
+        _ => Err(
+            "usage: herdr-project-picker open | pick [--print] | bind-key --config PATH [--key KEY]"
+                .into(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("herdr-project-picker: {message}");
+            eprintln!("herdr-project-picker: {}", printable(&message));
             ExitCode::FAILURE
         }
     }
+}
+
+/// Error text can come from a remote machine: show no terminal controls in it.
+fn printable(message: &str) -> String {
+    message
+        .lines()
+        .map(picker::sanitize)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn env(name: &str) -> Result<String, String> {
@@ -37,7 +57,10 @@ fn env(name: &str) -> Result<String, String> {
 }
 
 fn herdr() -> HerdrCli {
-    HerdrCli(std::env::var_os("HERDR_BIN_PATH").map_or_else(|| "herdr".into(), PathBuf::from))
+    HerdrCli {
+        bin: std::env::var_os("HERDR_BIN_PATH").map_or_else(|| "herdr".into(), PathBuf::from),
+        timeout: handoff::CALL_TIMEOUT,
+    }
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -68,6 +91,39 @@ fn open() -> Result<(), String> {
     handoff::open_popup(&herdr(), &env("HERDR_PLUGIN_ID")?, &env("HERDR_PANE_ID")?)
 }
 
+fn bind_key(args: Vec<String>) -> Result<(), String> {
+    let usage = "usage: herdr-project-picker bind-key --config PATH [--key KEY]";
+    let (mut config, mut key) = (None, bind::DEFAULT_KEY.to_string());
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => config = args.next().map(PathBuf::from),
+            "--key" => key = args.next().ok_or(usage)?,
+            _ => return Err(usage.into()),
+        }
+    }
+    let config = config.ok_or(usage)?;
+    println!("{}", bind::bind(&config, &key, &bind::action_id())?);
+    Ok(())
+}
+
+/// The current machine, then the enabled saved ones in Herdr's order. The
+/// catalog is the one of the server running this plugin; when it cannot be
+/// read, only the current machine is offered, with the reason.
+fn machines(herdr: &dyn Herdr) -> (Vec<Machine>, Option<String>) {
+    let mut machines = vec![Machine::current()];
+    let catalog = herdr
+        .run(&handoff::routed(None, &["machine", "list", "--json"]))
+        .and_then(|json| machine::saved_machines(&json));
+    match catalog {
+        Ok(saved) => {
+            machines.extend(saved);
+            (machines, None)
+        }
+        Err(err) => (machines, Some(format!("Saved machines unavailable: {err}"))),
+    }
+}
+
 fn pick(print_only: bool) -> Result<(), String> {
     let pane = if print_only {
         String::new()
@@ -79,27 +135,53 @@ fn pick(print_only: bool) -> Result<(), String> {
         Err(message) => return pause(&message),
     };
     let config_file = config_dir().map_or(CONFIG_FILE.into(), |dir| dir.join(CONFIG_FILE));
-    let notice = format!(
-        "No projects found.\nSet `roots` in {}\nsee config.example.toml",
-        config_file.display()
-    );
-    let chosen = picker::run(config::discover(&config), &notice).map_err(|err| err.to_string())?;
-    let Some(project) = chosen else {
-        return Ok(()); // Escape: leave everything as it is
+    let herdr = herdr();
+    let (machines, catalog_warning) = machines(&herdr);
+    let labels = machines.iter().map(|m| m.label.clone()).collect();
+    let chosen = Arc::new(Mutex::new(None));
+
+    let load: LoadFn = {
+        let (herdr, machines, config) = (herdr.clone(), machines.clone(), config.clone());
+        Arc::new(move |tab| {
+            let mut loaded = machine::load(&machines[tab], &herdr, &config, &config_file)?;
+            if let (0, Some(warning)) = (tab, &catalog_warning) {
+                loaded = Loaded {
+                    note: Some(match loaded.note {
+                        Some(note) => format!("{warning}\n{note}"),
+                        None => warning.clone(),
+                    }),
+                    ..loaded
+                };
+            }
+            Ok(loaded)
+        })
     };
-    if print_only {
-        println!("{}", project.path.display());
-        return Ok(());
-    }
-    match handoff::open_project(&herdr(), &pane, &project.path, config.direction) {
-        Ok(()) => Ok(()),
-        Err(message) => pause(&message),
+    let open: OpenFn = {
+        let (herdr, machines, direction, chosen) =
+            (herdr.clone(), machines, config.direction, chosen.clone());
+        Arc::new(move |tab, row| {
+            if print_only {
+                *chosen.lock().unwrap() = Some(row.path);
+                return Ok(None);
+            }
+            handoff::open_project(&herdr, &machines[tab], &row, &pane, direction)
+        })
+    };
+
+    match picker::run(labels, load, open).map_err(|err| err.to_string())? {
+        Finish::Failed(message) => Err(message),
+        Finish::Cancelled | Finish::Opened => {
+            if let Some(path) = chosen.lock().unwrap().take() {
+                println!("{path}");
+            }
+            Ok(())
+        }
     }
 }
 
 /// The popup closes as soon as the process exits, so hold an error on screen.
 fn pause(message: &str) -> Result<(), String> {
-    eprintln!("{message}\n\nPress Enter to close.");
+    eprintln!("{}\n\nPress Enter to close.", printable(message));
     let _ = std::io::stdin().read_line(&mut String::new());
     Err(message.to_string())
 }

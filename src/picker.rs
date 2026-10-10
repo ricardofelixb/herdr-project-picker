@@ -1,13 +1,17 @@
-//! The popup's searchable project list: a pure state machine plus the thin
-//! crossterm loop that drives it.
+//! The popup's machine tabs and searchable project list: a pure state machine
+//! plus the thin crossterm loop that drives it.
 
-use crate::config::Project;
+use crate::machine::Loaded;
+use crate::snapshot::Row;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
 use std::io::{self, Write};
+use std::ops::Range;
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -16,6 +20,8 @@ pub enum Key {
     ClearQuery,
     Up,
     Down,
+    Tab,
+    BackTab,
     Enter,
     Esc,
 }
@@ -23,30 +29,85 @@ pub enum Key {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Continue,
-    Choose(Project),
+    /// Open `row`, which was loaded for the machine tab `tab`.
+    Choose {
+        tab: usize,
+        row: Row,
+    },
     Cancel,
 }
 
+/// A machine tab's projects. They are loaded when the tab is first shown and
+/// kept for the life of the dialog.
+enum Load {
+    NotLoaded,
+    Loading,
+    Ready(Loaded),
+    Failed(String),
+}
+
+struct Tab {
+    label: String,
+    load: Load,
+}
+
+enum Phase {
+    Browsing,
+    /// A project was chosen and Herdr is being asked to open it.
+    Opening(String),
+    /// The open finished with something to tell the user.
+    Done(Result<String, String>),
+}
+
+/// What the list area shows for the active tab.
+pub enum Body<'a> {
+    Loading(&'a str),
+    Failed { label: &'a str, error: &'a str },
+    Ready { note: Option<&'a str> },
+}
+
 pub struct State {
-    projects: Vec<Project>,
+    tabs: Vec<Tab>,
+    active: usize,
     query: String,
     matches: Vec<usize>,
     selected: usize,
+    phase: Phase,
 }
 
 impl State {
-    pub fn new(projects: Vec<Project>) -> State {
-        let mut state = State {
-            projects,
+    /// One tab per machine label; the first one is shown.
+    pub fn new(labels: Vec<String>) -> State {
+        assert!(!labels.is_empty(), "there is always a current machine");
+        State {
+            tabs: labels
+                .into_iter()
+                .map(|label| Tab {
+                    label,
+                    load: Load::NotLoaded,
+                })
+                .collect(),
+            active: 0,
             query: String::new(),
             matches: Vec::new(),
             selected: 0,
-        };
-        state.refilter();
-        state
+            phase: Phase::Browsing,
+        }
     }
 
     pub fn handle(&mut self, key: Key) -> Outcome {
+        match self.phase {
+            Phase::Browsing => {}
+            // Escape stops waiting; whatever Herdr was already asked may still finish.
+            Phase::Opening(_) => return Self::only_escape(key),
+            Phase::Done(_) => {
+                return if matches!(key, Key::Enter | Key::Esc) {
+                    Outcome::Cancel
+                } else {
+                    Outcome::Continue
+                }
+            }
+        }
         match key {
             Key::Char(c) => {
                 self.query.push(c);
@@ -66,14 +127,65 @@ impl State {
                     self.selected += 1;
                 }
             }
+            Key::Tab => self.switch((self.active + 1) % self.tabs.len()),
+            Key::BackTab => self.switch((self.active + self.tabs.len() - 1) % self.tabs.len()),
             Key::Enter => {
-                if let Some(&index) = self.matches.get(self.selected) {
-                    return Outcome::Choose(self.projects[index].clone());
+                if let Some(row) = self.visible().get(self.selected).map(|row| (*row).clone()) {
+                    self.phase =
+                        Phase::Opening(format!("{} on {}", row.name, self.tabs[self.active].label));
+                    return Outcome::Choose {
+                        tab: self.active,
+                        row,
+                    };
                 }
             }
             Key::Esc => return Outcome::Cancel,
         }
         Outcome::Continue
+    }
+
+    fn only_escape(key: Key) -> Outcome {
+        if key == Key::Esc {
+            Outcome::Cancel
+        } else {
+            Outcome::Continue
+        }
+    }
+
+    fn switch(&mut self, tab: usize) {
+        self.active = tab;
+        // Coming back to a failed machine is the user asking to try it again.
+        if matches!(self.tabs[tab].load, Load::Failed(_)) {
+            self.tabs[tab].load = Load::NotLoaded;
+        }
+        self.refilter(); // the query stays, the selection starts over
+    }
+
+    /// The tab whose projects must be loaded now, if any: one that has not been
+    /// shown yet, or a failed one the user just came back to. Never repeated
+    /// on its own.
+    pub fn take_load_request(&mut self) -> Option<usize> {
+        let tab = &mut self.tabs[self.active];
+        if matches!(tab.load, Load::NotLoaded) {
+            tab.load = Load::Loading;
+            return Some(self.active);
+        }
+        None
+    }
+
+    pub fn finish_load(&mut self, tab: usize, result: Result<Loaded, String>) {
+        self.tabs[tab].load = match result {
+            Ok(loaded) => Load::Ready(loaded),
+            Err(error) => Load::Failed(error),
+        };
+        if tab == self.active {
+            self.refilter();
+        }
+    }
+
+    /// The open finished with something to show the user.
+    pub fn finish_open(&mut self, result: Result<String, String>) {
+        self.phase = Phase::Done(result);
     }
 
     pub fn query(&self) -> &str {
@@ -84,20 +196,48 @@ impl State {
         self.selected
     }
 
-    /// Projects matching the query, best first.
-    pub fn visible(&self) -> Vec<&Project> {
-        self.matches.iter().map(|&i| &self.projects[i]).collect()
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    pub fn labels(&self) -> Vec<&str> {
+        self.tabs.iter().map(|tab| tab.label.as_str()).collect()
+    }
+
+    pub fn body(&self) -> Body<'_> {
+        let tab = &self.tabs[self.active];
+        match &tab.load {
+            Load::NotLoaded | Load::Loading => Body::Loading(&tab.label),
+            Load::Failed(error) => Body::Failed {
+                label: &tab.label,
+                error,
+            },
+            Load::Ready(loaded) => Body::Ready {
+                note: loaded.note.as_deref(),
+            },
+        }
+    }
+
+    /// Rows of the active tab matching the query, best first.
+    pub fn visible(&self) -> Vec<&Row> {
+        match &self.tabs[self.active].load {
+            Load::Ready(loaded) => self.matches.iter().map(|&i| &loaded.rows[i]).collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn refilter(&mut self) {
         let query = self.query.to_lowercase();
         let terms: Vec<&str> = query.split_whitespace().collect();
-        let mut scored: Vec<(usize, u32)> = self
-            .projects
-            .iter()
-            .enumerate()
-            .filter_map(|(i, project)| score(&terms, project).map(|s| (i, s)))
-            .collect();
+        let mut scored: Vec<(usize, u32)> = match &self.tabs[self.active].load {
+            Load::Ready(loaded) => loaded
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| score(&terms, row).map(|s| (i, s)))
+                .collect(),
+            _ => Vec::new(),
+        };
         scored.sort_by_key(|&(_, points)| std::cmp::Reverse(points)); // stable: ties keep list order
         self.matches = scored.into_iter().map(|(i, _)| i).collect();
         self.selected = 0;
@@ -106,9 +246,9 @@ impl State {
 
 /// Every term must match: a name substring scores highest (earlier is
 /// better), then a name subsequence, then a substring of the full path.
-fn score(terms: &[&str], project: &Project) -> Option<u32> {
-    let name = project.name.to_lowercase();
-    let path = project.path.to_string_lossy().to_lowercase();
+fn score(terms: &[&str], row: &Row) -> Option<u32> {
+    let name = row.name.to_lowercase();
+    let path = row.path.to_lowercase();
     terms.iter().try_fold(0, |total, term| {
         let points = if let Some(at) = name.find(term) {
             1000 - at.min(500) as u32
@@ -147,6 +287,9 @@ pub fn map_key(event: KeyEvent) -> Option<Key> {
         KeyCode::Backspace => Some(Key::Backspace),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
+        KeyCode::BackTab => Some(Key::BackTab),
+        KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => Some(Key::BackTab),
+        KeyCode::Tab => Some(Key::Tab),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Esc => Some(Key::Esc),
         _ => None,
@@ -161,24 +304,111 @@ pub fn window_start(selected: usize, rows: usize, len: usize) -> usize {
     (selected + 1).saturating_sub(rows).min(len - rows)
 }
 
-/// Shows the picker until a project is chosen (`Some`) or it is cancelled
-/// (`None`). `notice` explains an empty list. Input is read with blocking
-/// reads, so nothing polls.
-pub fn run(projects: Vec<Project>, notice: &str) -> io::Result<Option<Project>> {
+/// Which tabs of the given display `widths` are drawn in `width` columns:
+/// the active one always, then its neighbors while they fit.
+pub fn tab_window(widths: &[usize], active: usize, width: usize) -> Range<usize> {
+    let mut used = widths[active].min(width);
+    let mut start = active;
+    while start > 0 && used + widths[start - 1] <= width {
+        start -= 1;
+        used += widths[start];
+    }
+    let mut end = active + 1;
+    while end < widths.len() && used + widths[end] <= width {
+        used += widths[end];
+        end += 1;
+    }
+    start..end
+}
+
+/// How the dialog ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Finish {
+    /// Escape, with nothing opened (or without waiting for it).
+    Cancelled,
+    /// The project opened; there was nothing to tell the user.
+    Opened,
+    /// Opening failed, or was reported and acknowledged.
+    Failed(String),
+}
+
+/// Loads one tab's projects; called on a worker thread.
+pub type LoadFn = Arc<dyn Fn(usize) -> Result<Loaded, String> + Send + Sync>;
+/// Opens `row` of tab `tab`; `Ok(Some(text))` is shown until dismissed.
+pub type OpenFn = Arc<dyn Fn(usize, Row) -> Result<Option<String>, String> + Send + Sync>;
+
+enum Msg {
+    Key(Key),
+    Redraw,
+    Loaded(usize, Result<Loaded, String>),
+    Opened(Result<Option<String>, String>),
+    InputFailed(String),
+}
+
+/// Shows the dialog until it ends. The loop blocks on one channel that the
+/// terminal reader and the load/open workers all send to, so it never polls
+/// and a slow machine only delays its own tab.
+pub fn run(labels: Vec<String>, load: LoadFn, open: OpenFn) -> io::Result<Finish> {
     let mut out = io::stdout();
     let _screen = Screen::enter()?;
-    let mut state = State::new(projects);
+    let (tx, rx) = mpsc::channel();
+    spawn_input(tx.clone());
+    let mut state = State::new(labels);
     loop {
-        draw(&mut out, &state, notice)?;
-        if let Event::Key(event) = event::read()? {
-            let Some(key) = map_key(event) else { continue };
-            match state.handle(key) {
+        if let Some(tab) = state.take_load_request() {
+            let (load, tx) = (load.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::Loaded(tab, load(tab)));
+            });
+        }
+        draw(&mut out, &state)?;
+        match rx.recv() {
+            Ok(Msg::Key(key)) => match state.handle(key) {
                 Outcome::Continue => {}
-                Outcome::Choose(project) => return Ok(Some(project)),
-                Outcome::Cancel => return Ok(None),
-            }
+                Outcome::Cancel => return Ok(finish(&state)),
+                Outcome::Choose { tab, row } => {
+                    let (open, tx) = (open.clone(), tx.clone());
+                    std::thread::spawn(move || {
+                        let _ = tx.send(Msg::Opened(open(tab, row)));
+                    });
+                }
+            },
+            Ok(Msg::Loaded(tab, result)) => state.finish_load(tab, result),
+            Ok(Msg::Opened(Ok(None))) => return Ok(Finish::Opened),
+            Ok(Msg::Opened(result)) => state.finish_open(result.map(Option::unwrap_or_default)),
+            Ok(Msg::Redraw) => {}
+            Ok(Msg::InputFailed(error)) => return Err(io::Error::other(error)),
+            Err(_) => return Ok(Finish::Cancelled),
         }
     }
+}
+
+fn finish(state: &State) -> Finish {
+    match &state.phase {
+        Phase::Done(Ok(_)) => Finish::Opened,
+        Phase::Done(Err(error)) => Finish::Failed(error.clone()),
+        _ => Finish::Cancelled,
+    }
+}
+
+/// Reads the terminal on its own thread, for the life of the process.
+fn spawn_input(tx: Sender<Msg>) {
+    std::thread::spawn(move || loop {
+        let msg = match event::read() {
+            Ok(Event::Key(event)) => map_key(event).map(Msg::Key),
+            Ok(Event::Resize(..)) => Some(Msg::Redraw),
+            Ok(_) => None,
+            Err(error) => {
+                let _ = tx.send(Msg::InputFailed(error.to_string()));
+                return;
+            }
+        };
+        if let Some(msg) = msg {
+            if tx.send(msg).is_err() {
+                return;
+            }
+        }
+    });
 }
 
 /// Raw mode on the alternate screen, restored on drop.
@@ -200,44 +430,70 @@ impl Drop for Screen {
     }
 }
 
-fn draw(out: &mut impl Write, state: &State, notice: &str) -> io::Result<()> {
+const HINTS: &str = " tab machine  up/down move  enter open  esc cancel";
+
+fn draw(out: &mut impl Write, state: &State) -> io::Result<()> {
     let (width, height) = terminal::size()?;
     let (width, height) = (width as usize, height as usize);
+    queue!(out, Clear(ClearType::All))?;
+    draw_header(out, state, width)?;
+
     let visible = state.visible();
-    let list_rows = height.saturating_sub(3);
-    let count = visible.len().to_string();
-
-    queue!(
-        out,
-        Clear(ClearType::All),
-        MoveTo(0, 0),
-        SetAttribute(Attribute::Bold),
-        Print(fit(" Open project", width.saturating_sub(count.len() + 2))),
-        SetAttribute(Attribute::Reset),
-        MoveTo(width.saturating_sub(count.len() + 1) as u16, 0),
-        SetAttribute(Attribute::Dim),
-        Print(&count),
-        SetAttribute(Attribute::Reset),
-        MoveTo(0, 1),
-        Print(fit(&format!(" > {}", state.query()), width))
-    )?;
-
-    if visible.is_empty() {
-        let text = if state.query().is_empty() {
-            notice
-        } else {
-            "No matching project"
-        };
-        for (row, line) in text.lines().take(list_rows).enumerate() {
-            queue!(
-                out,
-                MoveTo(1, 2 + row as u16),
-                SetAttribute(Attribute::Dim),
-                Print(fit(line, width.saturating_sub(2))),
-                SetAttribute(Attribute::Reset)
-            )?;
-        }
+    let top = 3;
+    let body_rows = height.saturating_sub(top + 1);
+    let (lines, note): (Vec<String>, Option<&str>) = match &state.phase {
+        Phase::Opening(what) => (
+            vec![
+                format!("Opening {what}..."),
+                "Esc stops waiting; Herdr may still finish the request.".into(),
+            ],
+            None,
+        ),
+        Phase::Done(Ok(text)) => (
+            text.lines()
+                .map(str::to_string)
+                .chain(["".into(), "Press Enter to close.".into()])
+                .collect(),
+            None,
+        ),
+        Phase::Done(Err(error)) => (
+            vec![
+                format!("Could not open: {error}"),
+                "".into(),
+                "Press Enter to close.".into(),
+            ],
+            None,
+        ),
+        Phase::Browsing => match state.body() {
+            Body::Loading(label) => (vec![format!("Loading projects from {label}...")], None),
+            Body::Failed { label, error } => (
+                vec![
+                    format!("{label} unavailable: {error}"),
+                    "Nothing was opened or installed. Tab for another machine.".into(),
+                ],
+                None,
+            ),
+            Body::Ready { note } if visible.is_empty() => {
+                let text = if state.query().is_empty() {
+                    note.unwrap_or("No projects found.")
+                } else {
+                    "No matching project"
+                };
+                (text.lines().map(str::to_string).collect(), None)
+            }
+            Body::Ready { note } => (Vec::new(), note),
+        },
+    };
+    for (row, line) in lines.iter().take(body_rows).enumerate() {
+        put(out, top + row, line, width)?;
     }
+    let note_rows = usize::from(note.is_some());
+    if let Some(note) = note {
+        let first = note.lines().next().unwrap_or_default();
+        put(out, top + body_rows.saturating_sub(1), first, width)?;
+    }
+
+    let list_rows = body_rows.saturating_sub(note_rows);
     let start = window_start(state.selected(), list_rows, visible.len());
     for (row, project) in visible.iter().skip(start).take(list_rows).enumerate() {
         let selected = start + row == state.selected();
@@ -245,9 +501,9 @@ fn draw(out: &mut impl Write, state: &State, notice: &str) -> io::Result<()> {
             " {} {}  {}",
             if selected { '>' } else { ' ' },
             project.name,
-            project.path.display()
+            project.path
         );
-        queue!(out, MoveTo(0, 2 + row as u16))?;
+        queue!(out, MoveTo(0, (top + row) as u16))?;
         if selected {
             queue!(out, SetAttribute(Attribute::Reverse))?;
         }
@@ -262,31 +518,89 @@ fn draw(out: &mut impl Write, state: &State, notice: &str) -> io::Result<()> {
         out,
         MoveTo(0, height.saturating_sub(1) as u16),
         SetAttribute(Attribute::Dim),
-        Print(fit(" up/down move  enter open  esc cancel", width)),
+        Print(fit(HINTS, width)),
         SetAttribute(Attribute::Reset),
         MoveTo(
             (4 + state.query().chars().count()).min(width.saturating_sub(1)) as u16,
-            1
+            2
         )
     )?;
     out.flush()
 }
 
-/// Makes `text` safe to print and cuts it to `width` characters, marking the
-/// cut with an ellipsis. Control characters (a directory name can hold ESC)
-/// are shown escaped, never sent to the terminal; handoff keeps the real path.
-fn fit(text: &str, width: usize) -> String {
-    let text: String = text
-        .chars()
-        .flat_map(|c| {
-            let shown = if c.is_control() {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            };
-            shown.chars().collect::<Vec<_>>()
-        })
+/// One dim, indented line of messages.
+fn put(out: &mut impl Write, row: usize, text: &str, width: usize) -> io::Result<()> {
+    queue!(
+        out,
+        MoveTo(1, row as u16),
+        SetAttribute(Attribute::Dim),
+        Print(fit(text, width.saturating_sub(2))),
+        SetAttribute(Attribute::Reset)
+    )
+}
+
+fn draw_header(out: &mut impl Write, state: &State, width: usize) -> io::Result<()> {
+    let count = state.visible().len().to_string();
+    queue!(
+        out,
+        MoveTo(0, 0),
+        SetAttribute(Attribute::Bold),
+        Print(fit(" Open project", width.saturating_sub(count.len() + 2))),
+        SetAttribute(Attribute::Reset),
+        MoveTo(width.saturating_sub(count.len() + 1) as u16, 0),
+        SetAttribute(Attribute::Dim),
+        Print(&count),
+        SetAttribute(Attribute::Reset),
+        MoveTo(0, 1)
+    )?;
+    let labels: Vec<String> = state
+        .labels()
+        .iter()
+        .map(|label| format!(" {} ", sanitize(label)))
         .collect();
+    let widths: Vec<usize> = labels.iter().map(|label| label.chars().count()).collect();
+    let shown = tab_window(&widths, state.active(), width);
+    let mut left = width;
+    for index in shown {
+        let text = fit(&labels[index], left);
+        left = left.saturating_sub(text.chars().count());
+        let attr = if index == state.active() {
+            Attribute::Reverse
+        } else {
+            Attribute::Dim
+        };
+        queue!(
+            out,
+            SetAttribute(attr),
+            Print(text),
+            SetAttribute(Attribute::Reset)
+        )?;
+    }
+    queue!(
+        out,
+        MoveTo(0, 2),
+        Print(fit(&format!(" > {}", state.query()), width))
+    )
+}
+
+/// Shows control characters (a directory name or a remote label can hold ESC)
+/// escaped instead of sending them to the terminal.
+pub fn sanitize(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// Makes `text` safe to print and cuts it to `width` characters, marking the
+/// cut with an ellipsis.
+fn fit(text: &str, width: usize) -> String {
+    let text = sanitize(text);
     if text.chars().count() <= width {
         return text;
     }
@@ -302,22 +616,38 @@ fn fit(text: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-    use std::path::PathBuf;
 
-    fn project(name: &str, parent: &str) -> Project {
-        Project {
-            name: name.into(),
-            path: PathBuf::from(parent).join(name),
-        }
+    fn row(name: &str, parent: &str) -> Row {
+        Row::new(&format!("{parent}/{name}"), None)
     }
 
+    fn rows() -> Vec<Row> {
+        vec![
+            row("alpha", "/work"),
+            row("beta-tools", "/work"),
+            row("gamma", "/clients/acme"),
+            row("tools", "/work"),
+        ]
+    }
+
+    fn loaded(rows: Vec<Row>) -> Result<Loaded, String> {
+        Ok(Loaded { rows, note: None })
+    }
+
+    /// A single-machine dialog whose projects have loaded.
     fn state() -> State {
-        State::new(vec![
-            project("alpha", "/work"),
-            project("beta-tools", "/work"),
-            project("gamma", "/clients/acme"),
-            project("tools", "/work"),
-        ])
+        let mut state = State::new(vec!["Current".into()]);
+        assert_eq!(state.take_load_request(), Some(0));
+        state.finish_load(0, loaded(rows()));
+        state
+    }
+
+    /// Current, Mini, Orgo with only the first one loaded.
+    fn machines() -> State {
+        let mut state = State::new(["Current", "Mini", "Orgo"].map(String::from).to_vec());
+        state.take_load_request();
+        state.finish_load(0, loaded(rows()));
+        state
     }
 
     fn type_text(state: &mut State, text: &str) {
@@ -379,13 +709,19 @@ mod tests {
     }
 
     #[test]
-    fn enter_chooses_the_highlighted_project() {
+    fn enter_chooses_the_highlighted_project_of_the_active_machine() {
         let mut s = state();
         s.handle(Key::Down);
         assert_eq!(
             s.handle(Key::Enter),
-            Outcome::Choose(project("beta-tools", "/work"))
+            Outcome::Choose {
+                tab: 0,
+                row: row("beta-tools", "/work")
+            }
         );
+        // Opening: further keys are ignored, so it cannot be opened twice.
+        assert_eq!(s.handle(Key::Enter), Outcome::Continue);
+        assert_eq!(s.handle(Key::Char('x')), Outcome::Continue);
     }
 
     #[test]
@@ -393,14 +729,144 @@ mod tests {
         let mut s = state();
         type_text(&mut s, "zzz");
         assert_eq!(s.handle(Key::Enter), Outcome::Continue);
-        assert_eq!(State::new(vec![]).handle(Key::Enter), Outcome::Continue);
+        let mut empty = State::new(vec!["Current".into()]);
+        empty.take_load_request();
+        empty.finish_load(0, loaded(vec![]));
+        assert_eq!(empty.handle(Key::Enter), Outcome::Continue);
     }
 
     #[test]
-    fn escape_cancels_even_with_a_query() {
+    fn tab_and_backtab_cycle_machines_and_keep_the_query() {
+        let mut s = machines();
+        type_text(&mut s, "to");
+        s.handle(Key::Down);
+        s.handle(Key::Tab);
+        assert_eq!((s.active(), s.query(), s.selected()), (1, "to", 0));
+        s.handle(Key::Tab);
+        s.handle(Key::Tab);
+        assert_eq!(s.active(), 0, "wraps forward");
+        s.handle(Key::BackTab);
+        assert_eq!(s.active(), 2, "wraps backward");
+        s.handle(Key::BackTab);
+        assert_eq!(s.active(), 1);
+        assert_eq!(s.labels(), ["Current", "Mini", "Orgo"]);
+    }
+
+    #[test]
+    fn a_tab_loads_on_first_show_only_and_stays_cached() {
+        let mut s = State::new(["Current", "Mini"].map(String::from).to_vec());
+        assert_eq!(s.take_load_request(), Some(0));
+        assert_eq!(s.take_load_request(), None, "already loading");
+        s.finish_load(0, loaded(rows()));
+        s.handle(Key::Tab);
+        assert_eq!(s.take_load_request(), Some(1));
+        assert_eq!(s.take_load_request(), None);
+        s.finish_load(1, loaded(vec![row("remote", "/srv")]));
+        s.handle(Key::BackTab);
+        s.handle(Key::Tab);
+        assert_eq!(s.take_load_request(), None, "no reload when coming back");
+        assert_eq!(names(&s), ["remote"]);
+    }
+
+    #[test]
+    fn a_failed_machine_is_retried_only_when_the_user_returns_to_it() {
+        let mut s = machines();
+        s.handle(Key::Tab);
+        assert_eq!(s.take_load_request(), Some(1));
+        s.finish_load(1, Err("timed out after 20s".into()));
+        assert!(matches!(
+            s.body(),
+            Body::Failed {
+                error: "timed out after 20s",
+                ..
+            }
+        ));
+        assert!(s.visible().is_empty(), "no other machine's list is shown");
+        assert_eq!(s.take_load_request(), None, "no automatic retry");
+        s.handle(Key::Tab);
+        s.handle(Key::BackTab);
+        assert_eq!(s.take_load_request(), Some(1));
+        assert!(matches!(s.body(), Body::Loading("Mini")));
+    }
+
+    #[test]
+    fn a_late_result_fills_its_own_tab_and_leaves_the_visible_one_alone() {
+        let mut s = machines();
+        s.handle(Key::Tab);
+        assert_eq!(s.take_load_request(), Some(1));
+        s.handle(Key::Tab); // user moves on while Mini is still loading
+        assert_eq!(s.take_load_request(), Some(2));
+        s.finish_load(1, loaded(vec![row("mini-app", "/m")]));
+        assert!(matches!(s.body(), Body::Loading("Orgo")));
+        assert!(s.visible().is_empty());
+        s.handle(Key::BackTab);
+        assert_eq!(names(&s), ["mini-app"]);
+    }
+
+    #[test]
+    fn loading_and_unavailable_machines_cannot_be_chosen() {
+        let mut s = machines();
+        s.handle(Key::Tab);
+        s.take_load_request();
+        assert_eq!(s.handle(Key::Enter), Outcome::Continue);
+        s.finish_load(1, Err("refused".into()));
+        assert_eq!(s.handle(Key::Enter), Outcome::Continue);
+    }
+
+    #[test]
+    fn a_chosen_remote_row_names_the_tab_it_was_loaded_for() {
+        let mut s = machines();
+        s.handle(Key::Tab);
+        s.take_load_request();
+        s.finish_load(1, loaded(vec![row("remote", "/srv")]));
+        assert_eq!(
+            s.handle(Key::Enter),
+            Outcome::Choose {
+                tab: 1,
+                row: row("remote", "/srv")
+            }
+        );
+    }
+
+    #[test]
+    fn escape_always_cancels() {
+        let mut loading = machines();
+        loading.handle(Key::Tab);
+        loading.take_load_request();
+        assert_eq!(loading.handle(Key::Esc), Outcome::Cancel);
+
+        let mut failed = machines();
+        failed.handle(Key::Tab);
+        failed.take_load_request();
+        failed.finish_load(1, Err("x".into()));
+        assert_eq!(failed.handle(Key::Esc), Outcome::Cancel);
+
+        let mut querying = state();
+        type_text(&mut querying, "al");
+        assert_eq!(querying.handle(Key::Esc), Outcome::Cancel);
+
+        let mut opening = state();
+        opening.handle(Key::Enter);
+        assert_eq!(opening.handle(Key::Esc), Outcome::Cancel);
+        assert_eq!(finish(&opening), Finish::Cancelled);
+
+        let mut done = state();
+        done.handle(Key::Enter);
+        done.finish_open(Ok("Opened it".into()));
+        assert_eq!(done.handle(Key::Char('x')), Outcome::Continue);
+        assert_eq!(done.handle(Key::Esc), Outcome::Cancel);
+        assert_eq!(finish(&done), Finish::Opened);
+    }
+
+    #[test]
+    fn a_failed_open_is_held_until_dismissed_and_then_reported() {
         let mut s = state();
-        type_text(&mut s, "al");
-        assert_eq!(s.handle(Key::Esc), Outcome::Cancel);
+        s.handle(Key::Enter);
+        s.finish_open(Err(
+            "workspace api is no longer at the saved destination".into()
+        ));
+        assert_eq!(s.handle(Key::Enter), Outcome::Cancel);
+        assert!(matches!(finish(&s), Finish::Failed(e) if e.contains("no longer")));
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
@@ -442,8 +908,29 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::F(1), none, Press)), None);
     }
 
+    #[test]
+    fn tab_keys_map_in_both_terminal_encodings_of_shift_tab() {
+        use KeyEventKind::{Press, Release};
+        let none = KeyModifiers::NONE;
+        assert_eq!(map_key(key(KeyCode::Tab, none, Press)), Some(Key::Tab));
+        assert_eq!(
+            map_key(key(KeyCode::BackTab, KeyModifiers::SHIFT, Press)),
+            Some(Key::BackTab)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::BackTab, none, Press)),
+            Some(Key::BackTab)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Tab, KeyModifiers::SHIFT, Press)),
+            Some(Key::BackTab)
+        );
+        assert_eq!(map_key(key(KeyCode::Tab, none, Release)), None);
+    }
+
     // Unix directory names may hold anything but `/` and NUL, including a
-    // literal `ESC[2J` that would clear the popup if printed raw.
+    // literal `ESC[2J` that would clear the popup if printed raw. Remote
+    // labels, paths and error text are no more trusted.
     #[test]
     fn displayed_text_never_carries_terminal_controls() {
         let hostile = "evil\u{1b}[2J\u{7}\n\u{9b}name";
@@ -452,6 +939,7 @@ mod tests {
         assert_eq!(shown, "evil\\u{1b}[2J\\u{7}\\n\\u{9b}name");
         assert_eq!(fit(hostile, 6).chars().count(), 6);
         assert_eq!(fit("héllo wörld", 80), "héllo wörld");
+        assert_eq!(sanitize("Or\u{1b}go"), "Or\\u{1b}go");
     }
 
     #[test]
@@ -462,5 +950,21 @@ mod tests {
         assert_eq!(window_start(19, 5, 20), 15);
         assert_eq!(window_start(2, 5, 3), 0);
         assert_eq!(window_start(0, 0, 3), 0);
+    }
+
+    #[test]
+    fn the_active_tab_is_always_drawn() {
+        let widths = [9, 6, 7, 8];
+        assert_eq!(tab_window(&widths, 0, 80), 0..4);
+        assert_eq!(tab_window(&widths, 3, 80), 0..4);
+        assert_eq!(tab_window(&widths, 3, 16), 2..4);
+        assert_eq!(tab_window(&widths, 0, 16), 0..2);
+        assert_eq!(tab_window(&widths, 2, 7), 2..3);
+        assert_eq!(
+            tab_window(&widths, 1, 3),
+            1..2,
+            "too narrow still shows the active tab"
+        );
+        assert_eq!(tab_window(&widths, 1, 0), 1..2);
     }
 }
