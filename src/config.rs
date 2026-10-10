@@ -2,6 +2,7 @@
 //! plugin config directory and the machine's own folders; nothing is baked in.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,9 @@ pub struct Config {
     pub roots: Vec<PathBuf>,
     /// Folders that are projects themselves.
     pub projects: Vec<PathBuf>,
+    /// Roots on saved machines, keyed by Herdr machine label or profile id,
+    /// kept as written: `~` is that machine's home, expanded there.
+    pub machines: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +32,15 @@ struct RawConfig {
     roots: Vec<String>,
     #[serde(default)]
     projects: Vec<String>,
+    #[serde(default)]
+    machines: BTreeMap<String, RawMachine>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMachine {
+    #[serde(default)]
+    roots: Vec<String>,
 }
 
 impl Config {
@@ -35,9 +48,23 @@ impl Config {
         let raw: RawConfig = toml::from_str(text).map_err(|err| err.to_string())?;
         let expand =
             |paths: Vec<String>| absolute(paths.iter().map(|p| expand_home(p, home)).collect());
+        let machines = raw
+            .machines
+            .into_iter()
+            .map(
+                |(name, machine)| match machine.roots.iter().find(|r| !remote_root(r)) {
+                    Some(root) => Err(format!(
+                        "machines.{name}: {root:?} must start with / or ~/ and hold no ' or \
+                     control character"
+                    )),
+                    None => Ok((name, machine.roots)),
+                },
+            )
+            .collect::<Result<_, _>>()?;
         Ok(Config {
             roots: expand(raw.roots)?,
             projects: expand(raw.projects)?,
+            machines,
         })
     }
 
@@ -78,6 +105,13 @@ fn absolute(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
         )),
         None => Ok(paths),
     }
+}
+
+/// A root on a saved machine is listed by `sh` there, passed in single quotes:
+/// `~`, `~/...` or an absolute Unix path, with nothing that could end the quote.
+fn remote_root(root: &str) -> bool {
+    (root == "~" || root.starts_with("~/") || root.starts_with('/'))
+        && !root.chars().any(|c| c == '\'' || c.is_control())
 }
 
 /// Expands a leading `~` or `~/` to `home`; other paths are left as written.
@@ -209,6 +243,23 @@ mod tests {
         assert!(err.contains("projects"), "{err}");
     }
 
+    // Remote roots reach a shell on that machine inside single quotes.
+    #[test]
+    fn machine_roots_are_kept_as_written_and_unsafe_ones_refused() {
+        let text = "[machines.Mini]\nroots = [\"~/Projects\", \"/srv/x y\"]\n\
+                    [machines.Orgo]\nroots = [\"~\"]";
+        let config = Config::parse(text, Some(&abs("home-me"))).unwrap();
+        assert_eq!(config.machines["Mini"], ["~/Projects", "/srv/x y"]);
+        assert_eq!(config.machines["Orgo"], ["~"]);
+        // A tab: TOML turns the escape into a control character.
+        for bad in ["Projects", "~other/x", "/a'b", "/a\tb", "C:/x"] {
+            let text = format!("[machines.Mini]\nroots = [{bad:?}]");
+            let err = Config::parse(&text, None).unwrap_err();
+            assert!(err.contains("machines.Mini"), "{bad}: {err}");
+        }
+        assert!(Config::parse("[machines.Mini]\nrots = []", None).is_err());
+    }
+
     #[test]
     fn typos_and_bad_values_are_reported() {
         assert!(Config::parse("rots = []", None).is_err());
@@ -245,6 +296,7 @@ mod tests {
         let config = Config {
             roots: vec![root.0.clone(), root.0.join("missing")],
             projects: vec![root.0.join("beta"), root.0.join("also-missing")],
+            ..Config::default()
         };
         let names: Vec<_> = discover(&config).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Alpha", "beta"]);

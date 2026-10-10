@@ -26,6 +26,6 @@ id = "picker"
 title = "Open project"
 placement = "popup"
 # Terminal cells; Herdr centers the popup and shrinks it to fit small windows.
-width = 56
-height = 16
+width = 36
+height = 14
 command = ["target/release/herdr-project-picker", "pick"]

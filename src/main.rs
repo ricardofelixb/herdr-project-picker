@@ -132,7 +132,7 @@ fn pick(print_only: bool) -> Result<(), String> {
         Arc::new(move |tab, row| {
             if print_only {
                 *chosen.lock().unwrap() = Some(row.path);
-                return Ok(None);
+                return Ok(());
             }
             handoff::open_project(&herdr, &machines[tab], &row)
         })

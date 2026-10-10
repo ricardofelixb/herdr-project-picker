@@ -55,8 +55,8 @@ enum Phase {
     Browsing,
     /// A project was chosen and Herdr is being asked to open it.
     Opening(String),
-    /// The open finished with something to tell the user.
-    Done(Result<String, String>),
+    /// Opening failed; shown until dismissed.
+    Failed(String),
 }
 
 /// What the list area shows for the active tab.
@@ -100,7 +100,7 @@ impl State {
             Phase::Browsing => {}
             // Escape stops waiting; whatever Herdr was already asked may still finish.
             Phase::Opening(_) => return Self::only_escape(key),
-            Phase::Done(_) => {
+            Phase::Failed(_) => {
                 return if matches!(key, Key::Enter | Key::Esc) {
                     Outcome::Cancel
                 } else {
@@ -183,9 +183,9 @@ impl State {
         }
     }
 
-    /// The open finished with something to show the user.
-    pub fn finish_open(&mut self, result: Result<String, String>) {
-        self.phase = Phase::Done(result);
+    /// Opening failed: say so until the user dismisses it.
+    pub fn open_failed(&mut self, error: String) {
+        self.phase = Phase::Failed(error);
     }
 
     pub fn query(&self) -> &str {
@@ -334,14 +334,14 @@ pub enum Finish {
 
 /// Loads one tab's projects; called on a worker thread.
 pub type LoadFn = Arc<dyn Fn(usize) -> Result<Loaded, String> + Send + Sync>;
-/// Opens `row` of tab `tab`; `Ok(Some(text))` is shown until dismissed.
-pub type OpenFn = Arc<dyn Fn(usize, Row) -> Result<Option<String>, String> + Send + Sync>;
+/// Opens `row` of tab `tab`; the dialog closes once it succeeds.
+pub type OpenFn = Arc<dyn Fn(usize, Row) -> Result<(), String> + Send + Sync>;
 
 enum Msg {
     Key(Key),
     Redraw,
     Loaded(usize, Result<Loaded, String>),
-    Opened(Result<Option<String>, String>),
+    Opened(Result<(), String>),
     InputFailed(String),
 }
 
@@ -374,8 +374,8 @@ pub fn run(labels: Vec<String>, load: LoadFn, open: OpenFn) -> io::Result<Finish
                 }
             },
             Ok(Msg::Loaded(tab, result)) => state.finish_load(tab, result),
-            Ok(Msg::Opened(Ok(None))) => return Ok(Finish::Opened),
-            Ok(Msg::Opened(result)) => state.finish_open(result.map(Option::unwrap_or_default)),
+            Ok(Msg::Opened(Ok(()))) => return Ok(Finish::Opened),
+            Ok(Msg::Opened(Err(error))) => state.open_failed(error),
             Ok(Msg::Redraw) => {}
             Ok(Msg::InputFailed(error)) => return Err(io::Error::other(error)),
             Err(_) => return Ok(Finish::Cancelled),
@@ -385,8 +385,7 @@ pub fn run(labels: Vec<String>, load: LoadFn, open: OpenFn) -> io::Result<Finish
 
 fn finish(state: &State) -> Finish {
     match &state.phase {
-        Phase::Done(Ok(_)) => Finish::Opened,
-        Phase::Done(Err(error)) => Finish::Failed(error.clone()),
+        Phase::Failed(error) => Finish::Failed(error.clone()),
         _ => Finish::Cancelled,
     }
 }
@@ -451,14 +450,7 @@ fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> i
     let body_rows = height.saturating_sub(top);
     let (lines, note): (Vec<String>, Option<&str>) = match &state.phase {
         Phase::Opening(what) => (vec![format!("Opening {what}…")], None),
-        Phase::Done(Ok(text)) => (
-            text.lines()
-                .map(str::to_string)
-                .chain(["Enter to close".into()])
-                .collect(),
-            None,
-        ),
-        Phase::Done(Err(error)) => (
+        Phase::Failed(error) => (
             vec![format!("Could not open: {error}"), "Enter to close".into()],
             None,
         ),
@@ -490,20 +482,12 @@ fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> i
     for (row, project) in visible.iter().skip(start).take(list_rows).enumerate() {
         let name = fit(&format!(" {}", project.name), width);
         queue!(out, MoveTo(0, (top + row) as u16))?;
-        if start + row != state.selected() {
-            queue!(out, Print(name))?;
-            continue;
+        if start + row == state.selected() {
+            queue!(out, SetAttribute(Attribute::Reverse))?;
         }
-        // Only the highlighted row says where it lives, to tell same names apart.
-        let room = width.saturating_sub(name.chars().count());
-        let path = fit(&format!("  {}", project.path), room);
-        let pad = room.saturating_sub(path.chars().count());
         queue!(
             out,
-            SetAttribute(Attribute::Reverse),
-            Print(name),
-            SetAttribute(Attribute::Dim),
-            Print(format!("{path}{:pad$}", "")),
+            Print(format!("{name:<width$}")),
             SetAttribute(Attribute::Reset)
         )?;
     }
@@ -828,23 +812,20 @@ mod tests {
         assert_eq!(opening.handle(Key::Esc), Outcome::Cancel);
         assert_eq!(finish(&opening), Finish::Cancelled);
 
-        let mut done = state();
-        done.handle(Key::Enter);
-        done.finish_open(Ok("Opened it".into()));
-        assert_eq!(done.handle(Key::Char('x')), Outcome::Continue);
-        assert_eq!(done.handle(Key::Esc), Outcome::Cancel);
-        assert_eq!(finish(&done), Finish::Opened);
+        let mut failed = state();
+        failed.handle(Key::Enter);
+        failed.open_failed("x".into());
+        assert_eq!(failed.handle(Key::Char('x')), Outcome::Continue);
+        assert_eq!(failed.handle(Key::Esc), Outcome::Cancel);
     }
 
     #[test]
     fn a_failed_open_is_held_until_dismissed_and_then_reported() {
         let mut s = state();
         s.handle(Key::Enter);
-        s.finish_open(Err(
-            "workspace api is no longer at the saved destination".into()
-        ));
+        s.open_failed("no such folder".into());
         assert_eq!(s.handle(Key::Enter), Outcome::Cancel);
-        assert!(matches!(finish(&s), Finish::Failed(e) if e.contains("no longer")));
+        assert!(matches!(finish(&s), Finish::Failed(e) if e.contains("no such folder")));
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
@@ -964,19 +945,18 @@ mod tests {
         assert!(opening.contains("Opening alpha on Current"), "{opening}");
         assert!(!opening.contains("gamma"), "{opening}");
 
-        state.finish_open(Ok(
-            "Opened on Mini\nSelect Mini in the sidebar.\nThird line".into(),
-        ));
-        let done = screen(&state);
-        assert!(
-            done.contains("Third line") && done.contains("Enter to close"),
-            "{done}"
-        );
-        assert!(!done.contains("gamma"), "{done}");
-
-        state.finish_open(Err("destination is gone".into()));
+        state.open_failed("no such folder".into());
         let failed = screen(&state);
-        assert!(failed.contains("destination is gone"), "{failed}");
+        assert!(failed.contains("no such folder"), "{failed}");
+        assert!(failed.contains("Enter to close"), "{failed}");
         assert!(!failed.contains("gamma"), "{failed}");
+    }
+
+    // Names only: the list shows no folder paths.
+    #[test]
+    fn rows_show_names_without_paths() {
+        let shown = screen(&state());
+        assert!(shown.contains("gamma"), "{shown}");
+        assert!(!shown.contains('/') && !shown.contains('\\'), "{shown}");
     }
 }

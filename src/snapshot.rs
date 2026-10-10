@@ -75,6 +75,11 @@ fn is_inside(child: &str, parent: &str) -> bool {
     key(child).starts_with(&format!("{}/", key(parent)))
 }
 
+/// Whether `path` is `folder` or inside it.
+pub fn holds(folder: &str, path: &str) -> bool {
+    key(folder) == key(path) || is_inside(path, folder)
+}
+
 /// One row per project folder Herdr knows on the machine behind `machine`.
 ///
 /// A workspace's folder is its worktree checkout when it has one, otherwise

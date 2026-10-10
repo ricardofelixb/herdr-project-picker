@@ -27,6 +27,8 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 pub trait Herdr {
     /// Runs `herdr <args>`; returns stdout, or the failure text.
     fn run(&self, args: &[String]) -> Result<String, String>;
+    /// Runs `command` on a saved machine through OpenSSH, never prompting.
+    fn ssh(&self, target: &str, command: &str) -> Result<String, String>;
 }
 
 #[derive(Clone)]
@@ -38,6 +40,20 @@ pub struct HerdrCli {
 impl Herdr for HerdrCli {
     fn run(&self, args: &[String]) -> Result<String, String> {
         run_bounded(&self.bin, args, self.timeout)
+    }
+
+    fn ssh(&self, target: &str, command: &str) -> Result<String, String> {
+        let args = [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "--",
+            target,
+            command,
+        ];
+        let args: Vec<String> = args.map(String::from).to_vec();
+        run_bounded(Path::new("ssh"), &args, self.timeout)
     }
 }
 
@@ -66,18 +82,19 @@ pub fn run_bounded(program: &Path, args: &[String], timeout: Duration) -> Result
     if status.success() {
         return Ok(String::from_utf8_lossy(&stdout).into_owned());
     }
+    let name = program.file_stem().unwrap_or_default().to_string_lossy();
     Err(explain(
-        &status.to_string(),
+        &format!("{name} {status}"),
         &String::from_utf8_lossy(&stderr),
     ))
 }
 
 /// Herdr reports failures as `{"error":{"message":...}}` on stderr.
-fn explain(status: &str, stderr: &str) -> String {
+fn explain(what: &str, stderr: &str) -> String {
     serde_json::from_str::<Value>(stderr.trim())
         .ok()
         .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-        .unwrap_or_else(|| format!("herdr {status}: {}", stderr.trim()))
+        .unwrap_or_else(|| format!("{what}: {}", stderr.trim()))
 }
 
 fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
@@ -121,19 +138,13 @@ pub fn open_popup(herdr: &dyn Herdr, plugin_id: &str) -> Result<(), String> {
         .map(drop)
 }
 
-/// Opens `row` as a new workspace named after the project, with its shell in
-/// the project folder, on the machine the row was found on. `Ok(None)` means
-/// done and nothing to tell the user (the workspace is in front of them);
-/// `Ok(Some(text))` is what to tell them, because it is on another machine.
+/// Opens `row` as a new, focused workspace named after the project, with its
+/// shell in the project folder, on the machine the row was found on.
 ///
-/// A remote workspace is created unfocused: focus is server-wide and would
-/// move every other client attached to that server, and Herdr cannot switch
-/// this window to another machine anyway.
-pub fn open_project(
-    herdr: &dyn Herdr,
-    machine: &Machine,
-    row: &Row,
-) -> Result<Option<String>, String> {
+/// Herdr cannot switch this window to another machine, so for a saved machine
+/// the workspace becomes the one shown there (focus is per server: other
+/// windows on that machine follow) and a Herdr toast says where it went.
+pub fn open_project(herdr: &dyn Herdr, machine: &Machine, row: &Row) -> Result<(), String> {
     if !is_absolute(&row.path) {
         return Err(format!("{} is not an absolute path", row.path));
     }
@@ -143,11 +154,6 @@ pub fn open_project(
             row.path, machine.label
         ));
     }
-    let focus = if machine.id.is_some() {
-        "--no-focus"
-    } else {
-        "--focus"
-    };
     let args = [
         "workspace",
         "create",
@@ -155,15 +161,17 @@ pub fn open_project(
         &row.path,
         "--label",
         &row.name,
-        focus,
+        "--focus",
     ];
     herdr.run(&routed(machine.id.as_deref(), &args))?;
-    Ok(machine.id.as_ref().map(|_| {
-        format!(
-            "Opened {} on {}.\nSelect it in the Herdr sidebar.",
-            row.name, machine.label
-        )
-    }))
+    if machine.id.is_some() {
+        // Cosmetic, hence best effort: the workspace already exists.
+        let title = format!("Opened {} on {}", row.name, machine.label);
+        let body = format!("Select {} in the sidebar.", machine.label);
+        let toast = ["notification", "show", &title, "--body", &body];
+        let _ = herdr.run(&routed(None, &toast));
+    }
+    Ok(())
 }
 
 /// A scripted stand-in for the Herdr CLI, shared by the tests of the modules
@@ -206,6 +214,11 @@ pub mod mock {
                 .map(|(_, reply)| reply.clone())
                 .unwrap_or(Ok(String::new()))
         }
+
+        /// Recorded as `ssh <target> <command>`.
+        fn ssh(&self, target: &str, command: &str) -> Result<String, String> {
+            self.run(&["ssh".into(), target.into(), command.into()])
+        }
     }
 }
 
@@ -218,6 +231,7 @@ mod tests {
         Machine {
             id: Some(id.into()),
             label: "Orgo".into(),
+            target: None,
         }
     }
 
@@ -250,7 +264,7 @@ mod tests {
     fn local_project_opens_as_a_focused_workspace_named_after_it() {
         let mock = Mock::default();
         let row = Row::new("/work/my project", None);
-        assert_eq!(open_project(&mock, &Machine::current(), &row), Ok(None));
+        assert_eq!(open_project(&mock, &Machine::current(), &row), Ok(()));
         assert_eq!(
             mock.calls(),
             [[
@@ -286,20 +300,28 @@ mod tests {
         assert_eq!(done, Err("no such folder".to_string()));
     }
 
+    // Herdr cannot switch this window to another machine: the workspace is
+    // focused there, and a toast on this machine says where it went.
     #[test]
-    fn remote_project_is_routed_by_profile_id_and_left_unfocused() {
+    fn remote_project_is_routed_by_profile_id_focused_there_and_announced_here() {
         let mock = Mock::default();
         let row = Row::new("/srv/api", Some("prof-b"));
-        let told = open_project(&mock, &remote("prof-b"), &row).unwrap();
+        open_project(&mock, &remote("prof-b"), &row).unwrap();
         assert_eq!(
             mock.joined(),
-            ["--machine prof-b workspace create --cwd /srv/api --label api --no-focus"]
+            [
+                "--machine prof-b workspace create --cwd /srv/api --label api --focus",
+                "notification show Opened api on Orgo --body Select Orgo in the sidebar.",
+            ]
         );
         only_new_workspaces(&mock);
-        let told = told.expect("remote results are reported");
-        for part in ["api", "Orgo", "sidebar"] {
-            assert!(told.contains(part), "{part}: {told}");
-        }
+    }
+
+    #[test]
+    fn a_failed_toast_does_not_fail_the_open() {
+        let mock = Mock::default().reply("notification", Err("ui busy"));
+        let row = Row::new("/srv/api", Some("prof-b"));
+        assert_eq!(open_project(&mock, &remote("prof-b"), &row), Ok(()));
     }
 
     #[test]
@@ -325,7 +347,11 @@ mod tests {
         let row = Row::new("/srv/api", Some("prof-b"));
         let err = open_project(&mock, &remote("prof-b"), &row).unwrap_err();
         assert!(err.contains("connection refused"), "{err}");
-        assert_eq!(mock.calls().len(), 1);
+        assert_eq!(
+            mock.calls().len(),
+            1,
+            "nothing is announced after a failure"
+        );
     }
 
     #[test]
@@ -398,8 +424,8 @@ mod tests {
         let json = r#"{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}"#;
         assert_eq!(explain("exit 1", json), "pane w1:p1 not found");
         assert_eq!(
-            explain("exit 2", "plain text\n"),
-            "herdr exit 2: plain text"
+            explain("ssh exit 2", "plain text\n"),
+            "ssh exit 2: plain text"
         );
         let missing = run_bounded(Path::new("herdr-does-not-exist"), &[], CALL_TIMEOUT);
         assert!(missing.unwrap_err().contains("herdr-does-not-exist"));
