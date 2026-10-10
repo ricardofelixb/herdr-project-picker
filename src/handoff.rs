@@ -67,8 +67,9 @@ pub fn open_popup(herdr: &dyn Herdr, plugin_id: &str, pane: &str) -> Result<(), 
 ///
 /// The split is created unfocused: a focused, unlabeled pane with an older
 /// sibling is exactly what the `pane.created` filter accepts, so the picker
-/// would reopen for its own pane. Herdr 0.9.3 cannot focus a pane by id, so
-/// focus then moves by direction from `pane`, whose neighbor the split is.
+/// would reopen for its own pane. The 0.9.3 CLI focuses only by direction (the
+/// socket's `pane.focus` by id has no CLI wrapper), so focus then moves by
+/// direction from `pane`, whose neighbor the split is.
 pub fn open_project(
     herdr: &dyn Herdr,
     pane: &str,

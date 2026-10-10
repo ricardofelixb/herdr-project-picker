@@ -70,10 +70,16 @@ What it does instead, for both the manual action and the automatic trigger:
   `--cwd` is passed to Herdr's server process, so configured roots and
   projects must be absolute (`~` is expanded); relative ones are rejected.
 - The split is created unfocused so the event hook cannot mistake it for a
-  user split (see section 1). Herdr 0.9.3 has no way to focus a pane by id
-  (`pane focus` takes only a direction), so focus moves to the split's
-  neighbor in the split direction. If that call fails the project is still
-  open; only the focus is left where it was.
+  user split (see section 1). The CLI's `pane focus` takes only a direction
+  (`src/cli/pane.rs`), so focus moves to the split's neighbor in the split
+  direction. If that call fails the project is still open; only the focus is
+  left where it was.
+  The 0.9.3 socket does implement focus by pane id: `pane.focus` with
+  `{"pane_id": ...}` is in `src/api/schema.rs`, `src/app/api/panes.rs` and the
+  bundled `herdr-api.schema.json`. It is not in the documented `socket-api.mdx`
+  method list and has no CLI wrapper, so using it would need a hand-written
+  socket client for an undocumented method. This was read from the source
+  only, never called.
 - **Escape / Ctrl-C** exit without any Herdr call.
 
 **Not possible safely in 0.9.3: replacing the new split's own shell.** With the
@@ -87,7 +93,9 @@ No API reports "at a prompt".
 **Smallest upstream extensions for a true in-place handoff:** a method to
 (re)start the shell of an idle pane in a directory, such as
 `pane respawn <pane> --cwd PATH`, or a `cwd` that a `pane.created` hook can
-supply before the shell starts; plus focusing a pane by id.
+supply before the shell starts; plus a documented CLI wrapper for the existing
+socket method `pane.focus` (for example `herdr pane focus <pane_id>`), which
+would let the plugin focus the exact new pane instead of a directional guess.
 
 ## 3. Popup and rendering
 
