@@ -9,6 +9,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaneInfo {
     pub pane_id: String,
+    pub workspace_id: String,
     pub tab_id: String,
     #[serde(default)]
     pub focused: bool,
@@ -54,6 +55,11 @@ pub fn created_pane(event_json: &str) -> Option<PaneInfo> {
     envelope.data.pane
 }
 
+/// Reads the panes out of `herdr pane list` output.
+pub fn listed_panes(_output: &str) -> Option<Vec<PaneInfo>> {
+    todo!()
+}
+
 /// `tab_panes` is every pane of the workspace, as printed by `pane list`.
 pub fn decide(created: &PaneInfo, tab_panes: &[PaneInfo]) -> Decision {
     if created.label.is_some() {
@@ -94,6 +100,7 @@ mod tests {
     fn pane(id: &str, tab: &str) -> PaneInfo {
         PaneInfo {
             pane_id: id.into(),
+            workspace_id: "w1".into(),
             tab_id: tab.into(),
             focused: true,
             label: None,
@@ -117,6 +124,16 @@ mod tests {
         assert!(created_pane(&event("pane_focused", &p)).is_none());
         assert!(created_pane(r#"{"event":"tab_created","data":{"type":"tab_created"}}"#).is_none());
         assert!(created_pane("not json").is_none());
+    }
+
+    #[test]
+    fn pane_list_output_is_read_and_rejects_anything_else() {
+        let output = r#"{"id":"cli","result":{"type":"pane_list","panes":[{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","focused":false},{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","focused":true,"label":"x"}]}}"#;
+        let panes = listed_panes(output).unwrap();
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[1].label.as_deref(), Some("x"));
+        assert!(listed_panes(r#"{"result":{}}"#).is_none());
+        assert!(listed_panes("oops").is_none());
     }
 
     #[test]
