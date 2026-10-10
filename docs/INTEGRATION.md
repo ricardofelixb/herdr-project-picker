@@ -21,8 +21,8 @@ profile id (`src/cli/machine.rs`). The plugin offers:
   guess, and hostnames are never compared.
 - **Saved machines**: the `enabled` rows, in the order Herdr lists them. The
   `id` is the only routing identity (`herdr --machine <id> ...`); labels may
-  repeat and are display text only. The `target` (SSH host) is never read, and
-  `selected` is persisted state, not the invoking window's live selection
+  repeat and are display text only. The `target` (SSH host) is read only to
+  list configured roots (section 2), and `selected` is persisted state, not the invoking window's live selection
   (`src/client/endpoint/catalog.rs:103-123`), so it is ignored.
 
 A plugin runs on the server of the selected machine and sees that server's own
@@ -56,15 +56,30 @@ allows `api snapshot`) replies `{"result":{"snapshot":{workspaces, panes, tabs,
   the plugin runs on Windows (`Path::is_absolute` would disagree).
 
 `herdr worktree list` is not called: the snapshot already carries the worktree
-checkout of every open workspace. Snapshots describe open sessions,
-not every project on disk, which is why the current machine also reads the
-configured `roots`; remote disks are not scanned.
+checkout of every open workspace. Snapshots describe open sessions, not every
+project on disk, and Herdr's own panes usually sit in the home folder, so each
+machine also lists configured roots:
+
+- **Current**: `roots`/`projects`, read from the local disk.
+- **Saved machine**: `[machines.<label or id>] roots`, listed read-only with
+  `ssh -o BatchMode=yes -o ConnectTimeout=10 -- <Herdr's saved target>
+  "sh -c '<script>' sh '<root>'..."`, bounded like every other call. Herdr has
+  no API that lists folders on another machine, and a plugin there could not
+  send its list back. The script prints each root as that machine expands
+  `~`, then the root's non-hidden subfolders. Roots are passed in single
+  quotes, so config parsing refuses quotes, control characters and anything
+  but `/...`, `~` or `~/...`; a target that could read as an option or holds
+  whitespace is dropped. A listing failure keeps the workspace folders and
+  says why under the list.
+
+On every machine a workspace folder that is or contains a configured root
+(typically the home folder) is dropped: it is not a project.
 
 ## 3. Opening a project
 
 A project is only ever opened by asking Herdr for a **new** workspace whose
 shell starts in the project: `herdr [--machine <id>] workspace create --cwd
-<project> --label <folder name> --focus|--no-focus`. Existing panes are never
+<project> --label <folder name> --focus`. Existing panes are never
 typed into, restarted or closed (`pane run`, `send-text`, `send-keys`, `pane
 close` and `pane split` are never used, and a test asserts it). It always
 creates a new workspace, even when the project is already open; that was the
@@ -73,14 +88,14 @@ verbatim (`src/cli/workspace.rs`), so a folder named like an option stays a
 value.
 
 - **Current**: created with `--focus`, so the window switches to it.
-- **Saved machine**: routed with `--machine <opaque profile id>` and created
-  with `--no-focus`. A row only opens on the machine it was read from, and a
-  configured/local row is refused on a saved machine. Remote machines are never
-  focused: `pane.focus` and `workspace.focus` are server-wide and would move
-  every other client attached to that server
-  (`public_api_focus_replaces_every_client_shell_projection`, installed source).
-  The popup says which machine got the workspace and to select it in the
-  sidebar.
+- **Saved machine**: routed with `--machine <opaque profile id>`, also with
+  `--focus`, so selecting that machine in the sidebar lands on the new
+  workspace. Focus is server-wide: other clients attached to that server move
+  too (`public_api_focus_replaces_every_client_shell_projection`, installed
+  source); the user asked to be taken to the workspace. A row only opens on
+  the machine it was read from, and a configured/local row is refused on a
+  saved machine. The popup closes and `herdr notification show` (on the
+  server running the plugin, best effort) says which machine got it.
 - **No client switch.** Switching the invoking window to another machine is an
   internal client action (`ActivateEndpoint`,
   `src/client/shell/endpoint_navigation.rs:228-296`); CLI `--machine` routing is
@@ -104,7 +119,7 @@ Plugin v1 has no native non-terminal UI, so the dialog is a Rust terminal
 program (crossterm, alternate screen) in a `placement = "popup"` pane. Popups
 are session-modal, have no pane id, emit no pane lifecycle events and receive
 all input including Escape (`plugins.mdx`). The popup is opened with `herdr
-plugin pane open` through `HERDR_BIN_PATH`; its size (56x16 cells, shrunk to fit)
+plugin pane open` through `HERDR_BIN_PATH`; its size (36x14 cells, shrunk to fit)
 and title come from the manifest. Opening can
 fail with `ui_busy` when another Herdr modal is active; the error is then only
 in the plugin command log (`herdr plugin log list`). Herdr draws the popup
@@ -192,8 +207,8 @@ before the switch to workspaces).
 **Unproven, needs a live Herdr:**
 
 1. `workspace create --focus` from inside the popup on Current, and the
-   compact layout at the 56x16 size.
-2. `--machine <id> workspace create --no-focus` on a saved machine, and the
+   compact layout at the 36x14 size.
+2. `--machine <id> workspace create --focus` and the toast on a saved machine, and the
    sidebar finding it.
 3. Tab/Shift+Tab as the terminal delivers them (Shift+Tab as `BackTab`).
 4. The plugin running with a remote server selected (it must be installed

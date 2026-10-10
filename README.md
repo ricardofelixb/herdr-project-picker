@@ -17,7 +17,7 @@ Bind it to a key (suggested `prefix+f`). The popup shows:
 ```
  Current  Mini  Orgo  MacBook
  › query
- agents-app  C:\projects\agents-app        <- highlighted
+ agents-app                    <- highlighted
  herdr-project-picker
  orchestrator
 ```
@@ -35,20 +35,24 @@ copies none.
   folders of the workspaces Herdr already has open (a worktree's checkout, or
   the panes' working directories; never a foreground process's directory).
 - The other tabs are the **enabled saved machines** from Herdr's catalog, in
-  Herdr's order. A machine's tab loads when you first open it (nothing polls)
-  and lists only the folders of workspaces open on that machine, read through
-  Herdr's own `--machine` bridge. Loading, unavailable (with the reason) and
-  empty states are shown; there is never a silent fallback to the local list.
+  Herdr's order. A machine's tab loads when you first open it (nothing polls):
+  the folders of workspaces open there, read through Herdr's own `--machine`
+  bridge, plus the subfolders of the roots you configure for it, listed
+  read-only over SSH with the target Herdr saved. Loading, unavailable (with
+  the reason) and empty states are shown; there is never a silent fallback to
+  the local list.
+- A workspace folder that merely contains a configured root (your home
+  folder, usually) is not listed as a project.
 - **Enter on Current** creates a new workspace named after the project, with
   its shell in the project folder, and switches to it. It always creates a new
   one, even when the project is already open.
-- **Enter on another machine** creates the workspace on that machine and tells
-  you so. It does **not** switch the window: Herdr offers no way for a plugin
-  to do that, so select it in the Herdr sidebar.
+- **Enter on another machine** creates the workspace there and makes it that
+  machine's active workspace, closes the popup and shows a Herdr toast. It
+  cannot switch your window to that machine (Herdr offers plugins no way to),
+  so click the machine in the sidebar and you land on the new workspace.
+  Focus is per server, so other windows showing that machine follow it.
 - The plugin never types into, restarts or closes an existing pane; it only
-  asks Herdr to create a new workspace. Remote workspaces are created
-  unfocused, because focusing is server-wide and would move every other client
-  attached there.
+  asks Herdr to create a new workspace.
 
 ## Limits you should know about
 
@@ -61,9 +65,9 @@ copies none.
   machine they run on, so it is shown as the synthetic **Current** tab; the
   persisted `selected` flag of the catalog is ignored because it does not
   describe your window.
-- Project folders on other machines are the ones Herdr reports for open
-  workspaces. The plugin does not scan remote disks, and your `roots` apply to
-  the current machine only.
+- Other machines' roots are listed over plain OpenSSH from the machine
+  running the plugin, so it needs non-interactive SSH access to them (the same
+  access Herdr uses). Listing runs `sh` there: Unix-like machines only.
 - Everything is manual: there is no automatic popup for new splits (Herdr's
   `pane.created` event cannot distinguish a split from a new tab's first pane;
   see [docs/INTEGRATION.md](docs/INTEGRATION.md)).
@@ -126,6 +130,9 @@ Optional `config.toml` in the plugin config directory
 ```toml
 roots = ["~/projects"]   # each subfolder is a project; absolute or ~/...
 projects = []            # folders that are projects themselves
+
+[machines.Mini]          # a saved machine, by its sidebar name
+roots = ["~/Projects"]   # listed over SSH; ~ is that machine's home
 ```
 
 Without any config the picker still lists the folders of your open Herdr
@@ -143,8 +150,9 @@ None of this installs, links or configures anything.
    cargo test --locked
    ```
 2. Read-only checks against a running Herdr (catalog and snapshots; creates
-   nothing). Add `HERDR_PICKER_LIVE_REMOTE=1` to also read
-   the saved machines through Herdr's non-interactive SSH bridge:
+   nothing). Add `HERDR_PICKER_LIVE_REMOTE=1` to also read the saved
+   machines, and `HERDR_PLUGIN_CONFIG_DIR=<dir>` to list their configured
+   roots over SSH:
    ```sh
    cargo test --locked live -- --ignored --nocapture
    ```

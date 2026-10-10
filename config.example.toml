@@ -1,10 +1,9 @@
 # Optional. Copy to the plugin config directory as config.toml:
 #   herdr plugin config-dir local.project-picker
 #
-# This file applies to the machine whose Herdr server runs the plugin (the
-# "Current" tab). Other machines' tabs list the folders of the workspaces open
-# there, and need no configuration. Without this file the picker still lists
-# the folders of your open Herdr workspaces.
+# `roots` and `projects` apply to the machine whose Herdr server runs the
+# plugin (the "Current" tab). Every tab also lists the folders of the Herdr
+# workspaces open on that machine. Without this file the picker still works.
 #
 # Paths must be absolute or start with "~"; relative paths are rejected because
 # Herdr resolves them in its own process.
@@ -14,3 +13,10 @@ roots = ["~/projects"]
 
 # Folders that are projects themselves.
 projects = []
+
+# Roots on saved machines, keyed by their name in the Herdr sidebar (or
+# profile id). They are listed read-only over SSH, using the target Herdr
+# saved for the machine, with BatchMode (no prompts). "~" is that machine's
+# home; paths must start with / or ~/. Unix-like machines only.
+# [machines.Mini]
+# roots = ["~/Projects"]
