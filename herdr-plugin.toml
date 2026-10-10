@@ -1,0 +1,31 @@
+id = "ricardofelixb.project-picker"
+name = "Project Picker"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Searchable project picker popup with machine tabs that opens a project as a new workspace"
+platforms = ["linux", "macos", "windows"]
+
+# `plugin install` runs this; with `plugin link`, run the same command yourself.
+# `--target-dir target` keeps the binary where the commands below look for it,
+# even when CARGO_TARGET_DIR is set.
+[[build]]
+command = ["cargo", "build", "--release", "--locked", "--target-dir", "target"]
+
+# Manual entry point: bind it with a `plugin_action` key (see README).
+# The program path has no extension on purpose: Herdr resolves it against the
+# plugin folder and Windows adds `.exe`.
+[[actions]]
+id = "pick"
+title = "Open project picker"
+contexts = ["pane"]
+command = ["target/release/herdr-project-picker", "open"]
+
+# The popup itself, opened by the action above.
+[[panes]]
+id = "picker"
+title = "Open project"
+placement = "popup"
+# Terminal cells; Herdr centers the popup and shrinks it to fit small windows.
+width = 36
+height = 14
+command = ["target/release/herdr-project-picker", "pick"]
