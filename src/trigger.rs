@@ -56,8 +56,18 @@ pub fn created_pane(event_json: &str) -> Option<PaneInfo> {
 }
 
 /// Reads the panes out of `herdr pane list` output.
-pub fn listed_panes(_output: &str) -> Option<Vec<PaneInfo>> {
-    todo!()
+pub fn listed_panes(output: &str) -> Option<Vec<PaneInfo>> {
+    #[derive(Deserialize)]
+    struct Reply {
+        result: Listing,
+    }
+    #[derive(Deserialize)]
+    struct Listing {
+        panes: Vec<PaneInfo>,
+    }
+    serde_json::from_str::<Reply>(output)
+        .ok()
+        .map(|reply| reply.result.panes)
 }
 
 /// `tab_panes` is every pane of the workspace, as printed by `pane list`.
