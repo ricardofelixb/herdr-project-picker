@@ -1,0 +1,3 @@
+mod trigger;
+
+fn main() {}
