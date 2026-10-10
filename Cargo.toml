@@ -5,6 +5,8 @@ edition = "2021"
 description = "Project picker popup plugin for Herdr: machine tabs, searchable list, new pane per project"
 rust-version = "1.85"
 readme = "README.md"
+license = "MIT"
+repository = "https://github.com/ricardofelixb/herdr-project-picker"
 keywords = ["herdr", "plugin", "project-picker"]
 
 [dependencies]

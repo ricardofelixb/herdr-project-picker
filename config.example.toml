@@ -1,5 +1,5 @@
 # Optional. Copy to the plugin config directory as config.toml:
-#   herdr plugin config-dir local.project-picker
+#   herdr plugin config-dir ricardofelixb.project-picker
 #
 # `roots` and `projects` apply to the machine whose Herdr server runs the
 # plugin (the "Current" tab). Every tab also lists the folders of the Herdr

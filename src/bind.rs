@@ -117,7 +117,7 @@ mod tests {
     use super::*;
     use crate::config::tempdir::TempDir;
 
-    const ACTION: &str = "local.project-picker.pick";
+    const ACTION: &str = "ricardofelixb.project-picker.pick";
 
     const USER_CONFIG: &str = r#"onboarding = false
 

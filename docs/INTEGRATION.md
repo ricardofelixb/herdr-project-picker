@@ -178,9 +178,8 @@ supply before the shell starts, would allow an in-place hand-off.
   plugin.
 - `min_herdr_version = "0.9.3"`; `--machine` and `machine list --json` are in
   the `0.9.3` CLI docs.
-- The plugin id `local.project-picker` is stable; `bind-key` derives the
-  qualified action id from the manifest, so renaming it to an owner-qualified id
-  before publishing needs no code change.
+- The plugin id is `ricardofelixb.project-picker`; `bind-key` derives the
+  qualified action id from the manifest.
 
 ## 7. Checked here vs. unproven
 

@@ -5,10 +5,8 @@ a searchable project list and one tab per Herdr machine. Pick a project and it
 opens as a **new workspace** in Herdr's sidebar, with the shell already in that
 folder.
 
-**Status: working local build for Herdr 0.9.3+.** Parsing of the machine
-catalog and workspace snapshots was checked against a live Herdr (read-only);
-the popup, keybinding and workspace creation still need a manual live check,
-listed in [Validation](#validation).
+**Status: v0.1 for Herdr 0.9.3+.** See [Validation](#validation) for what is
+covered by tests and what still needs a manual check on your setup.
 
 ## What it does
 
@@ -85,18 +83,21 @@ copies none.
 On each machine whose Herdr server should offer the picker:
 
 ```sh
-git clone <repository-url> herdr-project-picker
-cd herdr-project-picker
-cargo build --release --locked --target-dir target
-herdr plugin link "$(pwd)"
+herdr plugin install ricardofelixb/herdr-project-picker
 ```
 
-(`herdr plugin install <repository-url>` runs the same build for you.
-`--target-dir target` keeps the binary where the manifest looks for it even if
+That clones the repository and runs the manifest's build. To work on it
+instead, clone it, build with
+`cargo build --release --locked --target-dir target` and run
+`herdr plugin link "$(pwd)"`.
+(`--target-dir target` keeps the binary where the manifest looks for it even if
 `CARGO_TARGET_DIR` is set. A binary put on `PATH` by `cargo install` is not
 used; the manifest runs `target/release/herdr-project-picker`.)
 
-Then bind the key. `bind-key` appends one `[[keys.command]]` entry to your
+Then bind the key, either by adding the entry below to your client config
+yourself or with `bind-key`, run from the plugin folder (your clone, or the
+checkout `herdr plugin install` made under Herdr's `plugins/github` config
+folder). `bind-key` appends one `[[keys.command]]` entry to your
 client config after backing it up, and refuses to touch a key that is already
 used or a file that is not valid TOML:
 
@@ -114,7 +115,7 @@ against); `herdr config check` validates it. The entry added is:
 [[keys.command]]
 key = "prefix+f"
 type = "plugin_action"
-command = "local.project-picker.pick"
+command = "ricardofelixb.project-picker.pick"
 description = "Open project"
 ```
 
@@ -124,7 +125,7 @@ afterwards.
 ## Configure
 
 Optional `config.toml` in the plugin config directory
-(`herdr plugin config-dir local.project-picker`), see
+(`herdr plugin config-dir ricardofelixb.project-picker`), see
 [config.example.toml](config.example.toml):
 
 ```toml

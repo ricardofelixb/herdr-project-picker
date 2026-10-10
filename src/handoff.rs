@@ -253,10 +253,10 @@ mod tests {
     #[test]
     fn popup_is_opened_by_its_entrypoint_alone() {
         let mock = Mock::default();
-        open_popup(&mock, "local.project-picker").unwrap();
+        open_popup(&mock, "ricardofelixb.project-picker").unwrap();
         assert_eq!(
             mock.joined(),
-            ["plugin pane open --plugin local.project-picker --entrypoint picker"]
+            ["plugin pane open --plugin ricardofelixb.project-picker --entrypoint picker"]
         );
     }
 

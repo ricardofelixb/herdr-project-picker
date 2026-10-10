@@ -140,7 +140,7 @@ fn the_action_users_bind_exists_in_the_manifest() {
     let m = manifest();
     let action = &items(&m, "actions")[0];
     assert_eq!(action["id"].as_str(), Some("pick"));
-    assert_eq!(m["id"].as_str(), Some("local.project-picker"));
+    assert_eq!(m["id"].as_str(), Some("ricardofelixb.project-picker"));
     let contexts = action["contexts"].as_array().unwrap();
     assert!(contexts.iter().any(|c| c.as_str() == Some("pane")));
 }
