@@ -58,10 +58,11 @@ struct RawConfig {
 impl Config {
     pub fn parse(text: &str, home: Option<&Path>) -> Result<Config, String> {
         let raw: RawConfig = toml::from_str(text).map_err(|err| err.to_string())?;
-        let expand = |paths: Vec<String>| paths.iter().map(|p| expand_home(p, home)).collect();
+        let expand =
+            |paths: Vec<String>| absolute(paths.iter().map(|p| expand_home(p, home)).collect());
         Ok(Config {
-            roots: expand(raw.roots),
-            projects: expand(raw.projects),
+            roots: expand(raw.roots)?,
+            projects: expand(raw.projects)?,
             direction: raw.direction,
             auto_trigger: raw.auto_trigger,
         })
@@ -83,9 +84,26 @@ impl Config {
             Err(err) => return Err(format!("{}: {err}", path.display())),
         };
         if let Some(list) = roots_override {
-            config.roots = std::env::split_paths(list).collect();
+            config.roots = roots_from_list(list)?;
         }
         Ok(config)
+    }
+}
+
+/// Splits a PATH-style list of roots.
+pub fn roots_from_list(list: &OsStr) -> Result<Vec<PathBuf>, String> {
+    absolute(std::env::split_paths(list).collect())
+}
+
+/// Herdr resolves `--cwd` in its own server process, not in the plugin's
+/// folder, so a relative project path would open the wrong directory.
+fn absolute(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    match paths.iter().find(|path| !path.is_absolute()) {
+        Some(path) => Err(format!(
+            "{} is not an absolute path (start it with / or a drive, or ~ for home)",
+            path.display()
+        )),
+        None => Ok(paths),
     }
 }
 
@@ -168,22 +186,40 @@ mod tests {
         assert!(!config.auto_trigger);
     }
 
+    /// A path that is absolute on the platform running the tests.
+    fn abs(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    /// TOML literal string, so Windows backslashes need no escaping.
+    fn quoted(path: &Path) -> String {
+        format!("'{}'", path.display())
+    }
+
     #[test]
     fn home_prefix_is_expanded_only_when_home_is_known() {
-        let home = Path::new("/home/me");
-        let text = r#"roots = ["~/code", "~", "/abs", "~other/x"]"#;
-        let config = Config::parse(text, Some(home)).unwrap();
-        assert_eq!(
-            config.roots,
-            [
-                home.join("code"),
-                home.to_path_buf(),
-                PathBuf::from("/abs"),
-                PathBuf::from("~other/x")
-            ]
-        );
-        let config = Config::parse(r#"roots = ["~/code"]"#, None).unwrap();
-        assert_eq!(config.roots, [PathBuf::from("~/code")]);
+        let home = abs("home-me");
+        let text = format!("roots = [\"~/code\", \"~\", {}]", quoted(&abs("abs")));
+        let config = Config::parse(&text, Some(&home)).unwrap();
+        assert_eq!(config.roots, [home.join("code"), home.clone(), abs("abs")]);
+        assert!(Config::parse(r#"roots = ["~/code"]"#, None).is_err());
+        assert!(Config::parse(r#"roots = ["~other/x"]"#, Some(&home)).is_err());
+    }
+
+    // Herdr resolves `--cwd` in its own server process, so a relative path
+    // would open the wrong directory (or fail) instead of the project.
+    #[test]
+    fn relative_paths_are_rejected_with_the_offending_value() {
+        for text in [
+            r#"roots = ["projects"]"#,
+            r#"roots = ["./projects"]"#,
+            r#"projects = ["../app"]"#,
+        ] {
+            let err = Config::parse(text, Some(&abs("home-me"))).unwrap_err();
+            assert!(err.contains("absolute"), "{text}: {err}");
+        }
+        let err = Config::parse(r#"roots = ["projects"]"#, None).unwrap_err();
+        assert!(err.contains("projects"), "{err}");
     }
 
     #[test]
@@ -203,12 +239,16 @@ mod tests {
         let dir = TempDir::new("load");
         assert_eq!(Config::load(&dir.0, None, None).unwrap(), Config::default());
 
-        fs::write(dir.0.join(CONFIG_FILE), r#"roots = ["/from/file"]"#).unwrap();
-        let joined = std::env::join_paths(["/a", "/b"]).unwrap();
+        let text = format!("roots = [{}]", quoted(&abs("from-file")));
+        fs::write(dir.0.join(CONFIG_FILE), text).unwrap();
+        let joined = std::env::join_paths([abs("a"), abs("b")]).unwrap();
         let config = Config::load(&dir.0, Some(&joined), None).unwrap();
-        assert_eq!(config.roots, [PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(config.roots, [abs("a"), abs("b")]);
         let config = Config::load(&dir.0, None, None).unwrap();
-        assert_eq!(config.roots, [PathBuf::from("/from/file")]);
+        assert_eq!(config.roots, [abs("from-file")]);
+
+        let relative = std::env::join_paths(["projects"]).unwrap();
+        assert!(Config::load(&dir.0, Some(&relative), None).is_err());
 
         fs::write(dir.0.join(CONFIG_FILE), "roots = [").unwrap();
         assert!(Config::load(&dir.0, None, None).is_err());

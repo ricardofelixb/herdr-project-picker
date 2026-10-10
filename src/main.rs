@@ -59,7 +59,7 @@ fn load_config() -> Result<Config, String> {
     match (config_dir(), roots) {
         (Some(dir), roots) => Config::load(&dir, roots.as_deref(), home.as_deref()),
         (None, Some(roots)) => Ok(Config {
-            roots: std::env::split_paths(&roots).collect(),
+            roots: config::roots_from_list(&roots)?,
             ..Config::default()
         }),
         (None, None) => Err(format!(
