@@ -98,7 +98,7 @@ impl State {
             .enumerate()
             .filter_map(|(i, project)| score(&terms, project).map(|s| (i, s)))
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1)); // stable: ties keep list order
+        scored.sort_by_key(|&(_, points)| std::cmp::Reverse(points)); // stable: ties keep list order
         self.matches = scored.into_iter().map(|(i, _)| i).collect();
         self.selected = 0;
     }
@@ -223,7 +223,11 @@ fn draw(out: &mut impl Write, state: &State, notice: &str) -> io::Result<()> {
     )?;
 
     if visible.is_empty() {
-        let text = if state.query().is_empty() { notice } else { "No matching project" };
+        let text = if state.query().is_empty() {
+            notice
+        } else {
+            "No matching project"
+        };
         for (row, line) in text.lines().take(list_rows).enumerate() {
             queue!(
                 out,
@@ -260,7 +264,10 @@ fn draw(out: &mut impl Write, state: &State, notice: &str) -> io::Result<()> {
         SetAttribute(Attribute::Dim),
         Print(fit(" up/down move  enter open  esc cancel", width)),
         SetAttribute(Attribute::Reset),
-        MoveTo((4 + state.query().chars().count()).min(width.saturating_sub(1)) as u16, 1)
+        MoveTo(
+            (4 + state.query().chars().count()).min(width.saturating_sub(1)) as u16,
+            1
+        )
     )?;
     out.flush()
 }
@@ -362,7 +369,10 @@ mod tests {
     fn enter_chooses_the_highlighted_project() {
         let mut s = state();
         s.handle(Key::Down);
-        assert_eq!(s.handle(Key::Enter), Outcome::Choose(project("beta-tools", "/work")));
+        assert_eq!(
+            s.handle(Key::Enter),
+            Outcome::Choose(project("beta-tools", "/work"))
+        );
     }
 
     #[test]
@@ -391,15 +401,30 @@ mod tests {
         use KeyEventKind::{Press, Release};
         let none = KeyModifiers::NONE;
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(map_key(key(KeyCode::Char('a'), none, Press)), Some(Key::Char('a')));
-        assert_eq!(map_key(key(KeyCode::Char('A'), KeyModifiers::SHIFT, Press)), Some(Key::Char('A')));
+        assert_eq!(
+            map_key(key(KeyCode::Char('a'), none, Press)),
+            Some(Key::Char('a'))
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('A'), KeyModifiers::SHIFT, Press)),
+            Some(Key::Char('A'))
+        );
         assert_eq!(map_key(key(KeyCode::Char('a'), none, Release)), None);
         assert_eq!(map_key(key(KeyCode::Enter, none, Press)), Some(Key::Enter));
         assert_eq!(map_key(key(KeyCode::Esc, none, Press)), Some(Key::Esc));
-        assert_eq!(map_key(key(KeyCode::Char('c'), ctrl, Press)), Some(Key::Esc));
-        assert_eq!(map_key(key(KeyCode::Char('n'), ctrl, Press)), Some(Key::Down));
+        assert_eq!(
+            map_key(key(KeyCode::Char('c'), ctrl, Press)),
+            Some(Key::Esc)
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('n'), ctrl, Press)),
+            Some(Key::Down)
+        );
         assert_eq!(map_key(key(KeyCode::Char('p'), ctrl, Press)), Some(Key::Up));
-        assert_eq!(map_key(key(KeyCode::Char('u'), ctrl, Press)), Some(Key::ClearQuery));
+        assert_eq!(
+            map_key(key(KeyCode::Char('u'), ctrl, Press)),
+            Some(Key::ClearQuery)
+        );
         assert_eq!(map_key(key(KeyCode::Char('x'), ctrl, Press)), None);
         assert_eq!(map_key(key(KeyCode::F(1), none, Press)), None);
     }

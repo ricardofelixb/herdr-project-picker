@@ -76,7 +76,9 @@ impl Config {
     ) -> Result<Config, String> {
         let path = config_dir.join(CONFIG_FILE);
         let mut config = match std::fs::read_to_string(&path) {
-            Ok(text) => Config::parse(&text, home).map_err(|e| format!("{}: {e}", path.display()))?,
+            Ok(text) => {
+                Config::parse(&text, home).map_err(|e| format!("{}: {e}", path.display()))?
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(err) => return Err(format!("{}: {err}", path.display())),
         };
@@ -104,7 +106,12 @@ fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
 /// Lists the projects under the configured roots plus explicit projects,
 /// sorted by name. Unreadable or missing folders are skipped.
 pub fn discover(config: &Config) -> Vec<Project> {
-    let mut paths: Vec<PathBuf> = config.projects.iter().filter(|p| p.is_dir()).cloned().collect();
+    let mut paths: Vec<PathBuf> = config
+        .projects
+        .iter()
+        .filter(|p| p.is_dir())
+        .cloned()
+        .collect();
     for root in &config.roots {
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
@@ -124,9 +131,8 @@ pub fn discover(config: &Config) -> Vec<Project> {
             Some(Project { name, path })
         })
         .collect();
-    projects.sort_by(|a, b| {
-        (a.name.to_lowercase(), &a.path).cmp(&(b.name.to_lowercase(), &b.path))
-    });
+    projects
+        .sort_by(|a, b| (a.name.to_lowercase(), &a.path).cmp(&(b.name.to_lowercase(), &b.path)));
     projects.dedup_by(|a, b| a.path == b.path);
     projects
 }
@@ -140,8 +146,8 @@ mod tests {
 
     impl TempDir {
         fn new(name: &str) -> TempDir {
-            let dir = std::env::temp_dir()
-                .join(format!("herdr-picker-{}-{name}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("herdr-picker-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
@@ -186,7 +192,10 @@ mod tests {
         assert!(Config::parse(r#"direction = "left""#, None).is_err());
         assert!(Config::parse(r#"roots = "not-a-list""#, None).is_err());
         let config = Config::parse("direction = \"down\"\nauto_trigger = true", None).unwrap();
-        assert_eq!((config.direction, config.auto_trigger), (Direction::Down, true));
+        assert_eq!(
+            (config.direction, config.auto_trigger),
+            (Direction::Down, true)
+        );
     }
 
     #[test]

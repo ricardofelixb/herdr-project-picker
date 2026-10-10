@@ -195,7 +195,11 @@ mod tests {
         }
 
         fn commands(&self) -> Vec<String> {
-            self.calls.borrow().iter().map(|c| c[..2].join(" ")).collect()
+            self.calls
+                .borrow()
+                .iter()
+                .map(|c| c[..2].join(" "))
+                .collect()
         }
 
         fn calls(&self) -> Vec<Vec<String>> {
@@ -234,7 +238,13 @@ mod tests {
     }
 
     fn replace(mock: &Mock) -> Result<(), HandoffError> {
-        open_project(mock, Mode::Replace, "w1:p2", Path::new("/work/a"), Direction::Right)
+        open_project(
+            mock,
+            Mode::Replace,
+            "w1:p2",
+            Path::new("/work/a"),
+            Direction::Right,
+        )
     }
 
     #[test]
@@ -249,8 +259,9 @@ mod tests {
         let mock = Mock::default();
         open_popup(&mock, "local.project-picker", Mode::Replace, "w1:p3").unwrap();
         let call = mock.calls().remove(0).join(" ");
-        assert!(call
-            .starts_with("plugin pane open --plugin local.project-picker --entrypoint picker"));
+        assert!(
+            call.starts_with("plugin pane open --plugin local.project-picker --entrypoint picker")
+        );
         assert!(call.contains("--placement popup"));
         assert!(call.contains("--env HERDR_PICKER_MODE=replace"));
         assert!(call.contains("--env HERDR_PICKER_PANE=w1:p3"));
@@ -301,7 +312,10 @@ mod tests {
             let mock = Mock::default()
                 .reply("pane get", Ok(IDLE_PANE))
                 .reply("pane process-info", Ok(processes));
-            assert!(matches!(replace(&mock), Err(HandoffError::Refused(_))), "{processes}");
+            assert!(
+                matches!(replace(&mock), Err(HandoffError::Refused(_))),
+                "{processes}"
+            );
             assert_eq!(mock.commands(), ["pane get", "pane process-info"]);
         }
     }
@@ -315,7 +329,10 @@ mod tests {
             let mock = Mock::default()
                 .reply("pane get", Ok(pane))
                 .reply("pane process-info", Ok(IDLE_PROCESSES));
-            assert!(matches!(replace(&mock), Err(HandoffError::Refused(_))), "{pane}");
+            assert!(
+                matches!(replace(&mock), Err(HandoffError::Refused(_))),
+                "{pane}"
+            );
             assert!(!mock.commands().contains(&"pane split".to_string()));
         }
     }

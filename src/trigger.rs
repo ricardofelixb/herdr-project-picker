@@ -197,10 +197,16 @@ mod tests {
         let root = pane("w1:p1", "w1:t1");
         let mut p = pane("w1:p2", "w1:t1");
         p.focused = false;
-        assert_eq!(decide(&p, &[root.clone(), p.clone()]), Decision::Skip(Skip::Unfocused));
+        assert_eq!(
+            decide(&p, &[root.clone(), p.clone()]),
+            Decision::Skip(Skip::Unfocused)
+        );
         let mut p = pane("w1:p2", "w1:t1");
         p.label = Some("Picker".into());
-        assert_eq!(decide(&p, &[root.clone(), p.clone()]), Decision::Skip(Skip::Labeled));
+        assert_eq!(
+            decide(&p, &[root.clone(), p.clone()]),
+            Decision::Skip(Skip::Labeled)
+        );
         let mut p = pane("w1:p2", "w1:t1");
         p.agent = Some("claude".into());
         assert_eq!(decide(&p, &[root, p.clone()]), Decision::Skip(Skip::Agent));
