@@ -4,17 +4,13 @@
 //! - `open`: action; opens the picker popup for a new split beside the focused pane.
 //! - `pick`: popup entrypoint; the searchable list. `pick --print` just prints
 //!   the chosen path, which needs no running Herdr.
-//! - `on-pane-created`: event hook; opens the picker for a new split when
-//!   `auto_trigger` is on (off by default, see docs/INTEGRATION.md). The
-//!   project then opens in a further split; the new pane is left untouched.
 
 mod config;
 mod handoff;
 mod picker;
-mod trigger;
 
 use config::{Config, CONFIG_FILE};
-use handoff::{Herdr, HerdrCli};
+use handoff::HerdrCli;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -25,8 +21,7 @@ fn main() -> ExitCode {
     let result = match args.next().as_deref() {
         Some("open") => open(),
         Some("pick") => pick(args.any(|arg| arg == "--print")),
-        Some("on-pane-created") => on_pane_created(),
-        _ => Err("usage: herdr-project-picker open | pick [--print] | on-pane-created".into()),
+        _ => Err("usage: herdr-project-picker open | pick [--print]".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -71,27 +66,6 @@ fn load_config() -> Result<Config, String> {
 
 fn open() -> Result<(), String> {
     handoff::open_popup(&herdr(), &env("HERDR_PLUGIN_ID")?, &env("HERDR_PANE_ID")?)
-}
-
-fn on_pane_created() -> Result<(), String> {
-    if !load_config()?.auto_trigger {
-        return Ok(());
-    }
-    let Some(created) = trigger::created_pane(&env("HERDR_PLUGIN_EVENT_JSON")?) else {
-        return Ok(());
-    };
-    let herdr = herdr();
-    let listing = herdr.run(&[
-        "pane".into(),
-        "list".into(),
-        "--workspace".into(),
-        created.workspace_id.clone(),
-    ])?;
-    let panes = trigger::listed_panes(&listing).ok_or("unreadable `pane list` output")?;
-    if trigger::decide(&created, &panes) == trigger::Decision::Open {
-        handoff::open_popup(&herdr, &env("HERDR_PLUGIN_ID")?, &created.pane_id)?;
-    }
-    Ok(())
 }
 
 fn pick(print_only: bool) -> Result<(), String> {

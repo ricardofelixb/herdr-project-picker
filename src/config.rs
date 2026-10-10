@@ -31,9 +31,6 @@ pub struct Config {
     /// Folders that are projects themselves.
     pub projects: Vec<PathBuf>,
     pub direction: Direction,
-    /// Opt-in: open the picker for new split panes. Off by default because
-    /// Herdr cannot yet prove a pane was a user split.
-    pub auto_trigger: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,8 +48,6 @@ struct RawConfig {
     projects: Vec<String>,
     #[serde(default)]
     direction: Direction,
-    #[serde(default)]
-    auto_trigger: bool,
 }
 
 impl Config {
@@ -64,7 +59,6 @@ impl Config {
             roots: expand(raw.roots)?,
             projects: expand(raw.projects)?,
             direction: raw.direction,
-            auto_trigger: raw.auto_trigger,
         })
     }
 
@@ -183,7 +177,6 @@ mod tests {
         let config = Config::parse("", None).unwrap();
         assert!(config.roots.is_empty() && config.projects.is_empty());
         assert_eq!(config.direction, Direction::Right);
-        assert!(!config.auto_trigger);
     }
 
     /// A path that is absolute on the platform running the tests.
@@ -224,14 +217,11 @@ mod tests {
 
     #[test]
     fn typos_and_bad_values_are_reported() {
-        assert!(Config::parse("autotrigger = true", None).is_err());
+        assert!(Config::parse("rots = []", None).is_err());
         assert!(Config::parse(r#"direction = "left""#, None).is_err());
         assert!(Config::parse(r#"roots = "not-a-list""#, None).is_err());
-        let config = Config::parse("direction = \"down\"\nauto_trigger = true", None).unwrap();
-        assert_eq!(
-            (config.direction, config.auto_trigger),
-            (Direction::Down, true)
-        );
+        let config = Config::parse("direction = \"down\"", None).unwrap();
+        assert_eq!(config.direction, Direction::Down);
     }
 
     #[test]

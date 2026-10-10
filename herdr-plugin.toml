@@ -16,7 +16,7 @@ title = "Open project in a new split"
 contexts = ["pane"]
 command = ["target/release/herdr-project-picker", "open"]
 
-# The popup itself, opened by the action or the event hook below.
+# The popup itself, opened by the action above.
 [[panes]]
 id = "picker"
 title = "Project picker"
@@ -24,10 +24,3 @@ placement = "popup"
 width = "70%"
 height = "60%"
 command = ["target/release/herdr-project-picker", "pick"]
-
-# Opt-in automation. Herdr cannot tell a split from a new tab's first pane in
-# this event, so the hook exits at once unless `auto_trigger = true` is set in
-# the plugin's config.toml. See docs/INTEGRATION.md.
-[[events]]
-on = "pane.created"
-command = ["target/release/herdr-project-picker", "on-pane-created"]

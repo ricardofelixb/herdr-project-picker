@@ -46,8 +46,8 @@ fn required_fields_and_ids_follow_the_plugin_rules() {
 fn commands_run_the_built_binary_with_known_subcommands() {
     let m = manifest();
     let binary = format!("target/release/{}", env!("CARGO_PKG_NAME"));
-    let known = ["open", "pick", "on-pane-created"];
-    for table in ["actions", "panes", "events"] {
+    let known = ["open", "pick"];
+    for table in ["actions", "panes"] {
         for item in items(&m, table) {
             let argv = command(item);
             assert_eq!(argv[0], binary);
@@ -58,13 +58,13 @@ fn commands_run_the_built_binary_with_known_subcommands() {
     assert_eq!(&build[..3], ["cargo", "build", "--release"]);
 }
 
+// Manual-only: Herdr cannot tell a user split from a new tab's first pane in
+// `pane.created`, so no event hook may launch the picker on its own.
 #[test]
-fn the_picker_is_a_popup_and_the_only_hook_is_pane_created() {
+fn the_picker_is_a_popup_and_nothing_launches_it_automatically() {
     let m = manifest();
     let panes = items(&m, "panes");
     assert_eq!(panes[0]["id"].as_str(), Some("picker"));
     assert_eq!(panes[0]["placement"].as_str(), Some("popup"));
-    let events = items(&m, "events");
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["on"].as_str(), Some("pane.created"));
+    assert!(m.get("events").is_none(), "event hooks are removed");
 }
