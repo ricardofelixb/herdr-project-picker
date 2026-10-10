@@ -3,7 +3,7 @@ name = "herdr-project-picker"
 version = "0.1.0"
 edition = "2021"
 description = "Project picker popup plugin for Herdr: machine tabs, searchable list, new pane per project"
-rust-version = "1.82"
+rust-version = "1.85"
 readme = "README.md"
 keywords = ["herdr", "plugin", "project-picker"]
 

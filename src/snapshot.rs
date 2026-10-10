@@ -131,8 +131,10 @@ pub fn rows_from_snapshot(reply: &str, machine: Option<&str>) -> Result<Vec<Row>
             .collect();
 
         let mut folders: Vec<&str> = Vec::new();
-        let candidates = workspace["worktree"]["checkout_path"]
+        let checkout = workspace["worktree"]["checkout_path"]
             .as_str()
+            .filter(|path| is_absolute(path));
+        let candidates = checkout
             .into_iter()
             .chain(members.iter().filter_map(|pane| pane.cwd))
             .filter(|path| is_absolute(path));
@@ -141,10 +143,13 @@ pub fn rows_from_snapshot(reply: &str, machine: Option<&str>) -> Result<Vec<Row>
                 folders.push(path);
             }
         }
+        // Herdr says which folder is the worktree's root, so a pane that sits in
+        // one of its parents does not fold it away.
+        let is_checkout = |path: &str| checkout.is_some_and(|root| key(root) == key(path));
         let outer: Vec<&str> = folders
             .iter()
             .copied()
-            .filter(|path| !folders.iter().any(|other| is_inside(path, other)))
+            .filter(|path| is_checkout(path) || !folders.iter().any(|other| is_inside(path, other)))
             .collect();
 
         for folder in outer {
@@ -278,6 +283,25 @@ mod tests {
         assert_eq!(found[0].path, "/w/app-feature");
         assert_eq!(found[0].name, "app-feature");
         assert_eq!(found[0].dest.as_ref().unwrap().pane_id, "w1:p1");
+    }
+
+    // A pane that wandered above the checkout must not hide the checkout.
+    #[test]
+    fn a_checkout_survives_a_pane_in_one_of_its_parent_folders() {
+        let mut feature = workspace("w1", "feature");
+        feature["worktree"] = json!({"checkout_path": "/home/me/app-feature"});
+        let found = rows(&reply(
+            json!([feature]),
+            json!([
+                pane("w1:p1", "w1", "/home/me"),
+                pane("w1:p2", "w1", "/home/me/app-feature/src")
+            ]),
+        ));
+        let paths: Vec<_> = found.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(paths, ["/home/me/app-feature", "/home/me"]); // by name
+        for row in &found {
+            assert_eq!(row.dest.as_ref().unwrap().workspace_id, "w1");
+        }
     }
 
     #[test]

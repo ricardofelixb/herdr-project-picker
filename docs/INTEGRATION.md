@@ -42,7 +42,9 @@ allows `api snapshot`) replies `{"result":{"snapshot":{workspaces, panes, tabs,
   of its panes; a pane's `foreground_cwd` is **never** used (it is wherever a
   tool happens to run, not the project).
 - Folders nested inside another folder of the same workspace fold into the
-  outer one; separate workspaces keep their own folders.
+  outer one, except the worktree checkout, which Herdr names as the root and
+  which a pane sitting in one of its parent folders never hides; separate
+  workspaces keep their own folders.
 - Repeats across workspaces collapse deterministically (first workspace wins;
   Windows-style paths compare without case or separator differences); the
   list is sorted by name.

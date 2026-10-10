@@ -66,7 +66,7 @@ Bind it to a key (suggested `prefix+f`). The popup shows:
 
 - Herdr 0.9.3 or newer on every machine you use it on (popup plugin panes;
   `--machine` routing on the machine you invoke it from).
-- Rust 1.82+ with `cargo` to build; no other tools.
+- Rust 1.85+ with `cargo` to build (the locked dependencies need it); no other tools.
 - Windows, macOS and Linux are declared in the manifest; the manifest commands
   are the same on all three (Herdr/Windows adds `.exe`).
 

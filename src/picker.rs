@@ -434,11 +434,18 @@ const HINTS: &str = " tab machine  up/down move  enter open  esc cancel";
 
 fn draw(out: &mut impl Write, state: &State) -> io::Result<()> {
     let (width, height) = terminal::size()?;
-    let (width, height) = (width as usize, height as usize);
+    render(out, state, width as usize, height as usize)
+}
+
+fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> io::Result<()> {
     queue!(out, Clear(ClearType::All))?;
     draw_header(out, state, width)?;
 
-    let visible = state.visible();
+    // Only the browsing screen has a list; the other phases own the whole body.
+    let visible = match state.phase {
+        Phase::Browsing => state.visible(),
+        _ => Vec::new(),
+    };
     let top = 3;
     let body_rows = height.saturating_sub(top + 1);
     let (lines, note): (Vec<String>, Option<&str>) = match &state.phase {
@@ -966,5 +973,39 @@ mod tests {
             "too narrow still shows the active tab"
         );
         assert_eq!(tab_window(&widths, 1, 0), 1..2);
+    }
+
+    fn screen(state: &State) -> String {
+        let mut out = Vec::new();
+        render(&mut out, state, 80, 12).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    // The status, the result and the sidebar instructions are the whole point
+    // of the screen after Enter; project rows must not be drawn over them.
+    #[test]
+    fn project_rows_are_only_drawn_while_browsing() {
+        let mut state = state();
+        assert!(screen(&state).contains("gamma"));
+
+        state.handle(Key::Enter);
+        let opening = screen(&state);
+        assert!(opening.contains("Opening alpha on Current"), "{opening}");
+        assert!(!opening.contains("gamma"), "{opening}");
+
+        state.finish_open(Ok(
+            "Opened on Mini\nSelect Mini in the sidebar.\nThird line".into(),
+        ));
+        let done = screen(&state);
+        assert!(
+            done.contains("Third line") && done.contains("Press Enter"),
+            "{done}"
+        );
+        assert!(!done.contains("gamma"), "{done}");
+
+        state.finish_open(Err("destination is gone".into()));
+        let failed = screen(&state);
+        assert!(failed.contains("destination is gone"), "{failed}");
+        assert!(!failed.contains("gamma"), "{failed}");
     }
 }

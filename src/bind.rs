@@ -32,9 +32,14 @@ pub fn with_binding(existing: &str, key: &str, action: &str) -> Result<Option<St
         for (name, value) in keys {
             if name == "command" {
                 for entry in value.as_array().into_iter().flatten() {
-                    if entry["key"].as_str().is_some_and(|k| same_key(k, key)) {
-                        let ours = entry["type"].as_str() == Some("plugin_action")
-                            && entry["command"].as_str() == Some(action);
+                    // Every field of a command binding is optional in Herdr.
+                    if entry
+                        .get("key")
+                        .is_some_and(|chords| holds_key(chords, key))
+                    {
+                        let field = |name| entry.get(name).and_then(|value| value.as_str());
+                        let ours = field("type") == Some("plugin_action")
+                            && field("command") == Some(action);
                         return if ours {
                             Ok(None)
                         } else {
@@ -191,6 +196,30 @@ command = "someone.else.toggle"
         let same_key_other_action =
             "[[keys.command]]\nkey = \"prefix+f\"\ntype = \"shell\"\ncommand = \"ls\"\n";
         assert!(with_binding(same_key_other_action, "prefix+f", ACTION).is_err());
+    }
+
+    // Herdr takes `key` as a string or a list, and every command field is optional.
+    #[test]
+    fn command_entries_in_any_valid_shape_are_checked_without_panicking() {
+        let listed = "[[keys.command]]\nkey = [\"prefix+o\", \"prefix+f\"]\ncommand = \"ls\"\n";
+        let err = with_binding(listed, "prefix+f", ACTION).unwrap_err();
+        assert!(err.contains("already bound"), "{err}");
+
+        let untyped = "[[keys.command]]\nkey = \"prefix+f\"\ncommand = \"echo hello\"\n";
+        let err = with_binding(untyped, "prefix+f", ACTION).unwrap_err();
+        assert!(err.contains("already bound"), "{err}");
+
+        for odd in ["[[keys.command]]\ncommand = \"ls\"\n", "[[keys.command]]\n"] {
+            let bound = with_binding(odd, "prefix+f", ACTION).unwrap().unwrap();
+            assert!(bound.starts_with(odd) && bound.contains(ACTION), "{odd:?}");
+        }
+        // Not a Herdr config at all: refused, not a panic.
+        assert!(with_binding("[keys]\ncommand = [1, \"x\"]\n", "prefix+f", ACTION).is_err());
+
+        let ours = format!(
+            "[[keys.command]]\nkey = [\"prefix+f\"]\ntype = \"plugin_action\"\ncommand = {ACTION:?}\n"
+        );
+        assert_eq!(with_binding(&ours, "prefix+f", ACTION), Ok(None));
     }
 
     #[test]
