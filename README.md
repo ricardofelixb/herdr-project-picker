@@ -1,103 +1,157 @@
 # Herdr Project Picker
 
-A standalone Rust plugin proof of concept for [Herdr](https://herdr.dev): a
-searchable project list in a centered Herdr popup. Pick a project and it opens
-in a new split, with the shell already in the project folder.
+A standalone Rust plugin for [Herdr](https://herdr.dev): a centered popup with
+a searchable project list and one tab per Herdr machine. Pick a project and it
+opens in a **new pane** with the shell already in that folder.
 
-**Status: local proof of concept for Herdr 0.9.3.** Nothing here has been run
-inside a live Herdr yet; see [Validation](#validation) and
-[docs/INTEGRATION.md](docs/INTEGRATION.md) for what is and is not proven.
+**Status: working local build for Herdr 0.9.3+.** Parsing of the machine
+catalog and workspace snapshots was checked against a live Herdr (read-only);
+the popup, keybinding and pane creation still need a manual live check, listed
+in [Validation](#validation).
 
 ## What it does
 
-- **Manual action** `local.project-picker.pick`: opens the popup. Type to
-  filter, Up/Down (or Ctrl-N/Ctrl-P) to move, Enter to open the project in a
-  new split next to the focused pane, Escape (or Ctrl-C) to cancel. Cancelling
-  touches nothing.
-- **Project roots are configuration**, read from the plugin's own `config.toml`
-  (see [config.example.toml](config.example.toml)). There are no built-in
-  paths and no dependency on any other tool.
-- **Safe handoff**: the project reaches the shell only through
-  `herdr pane split --cwd <project>`, which starts a *new* shell in that folder.
-  The plugin never types into, restarts or closes an existing pane (`pane run`,
-  `send-text`, `send-keys` and `pane close` are not used).
-- **Paths must be absolute** (`~` is expanded). Herdr resolves the folder in
-  its own process, so a relative path would open the wrong place; relative
-  entries are rejected with an error.
-- **Automatic trigger for new splits** is implemented but **off by default**
-  (`auto_trigger = false`). Herdr 0.9.3 gives the `pane.created` event no
-  origin, so the plugin can only guess that a pane is a user split, never
-  prove it. New tabs are never intended to trigger it. When it fires, the
-  new split keeps its own empty shell and the project opens in a further
-  split beside it: Herdr 0.9.3 offers no safe way to replace or re-enter the
-  new pane's shell. The precise blocker and the smallest upstream changes are
-  in [docs/INTEGRATION.md](docs/INTEGRATION.md).
+Bind it to a key (suggested `prefix+f`). The popup shows:
+
+```
+ Open project                                   3
+ Current  Mini  Orgo  MacBook
+ > query
+ > agents-app           C:\projects\agents-app
+   herdr-project-picker C:\projects\herdr-project-picker
+ tab machine  up/down move  enter open  esc cancel
+```
+
+- **Type** to filter, **Up/Down** (or Ctrl-N/Ctrl-P) to choose, **Tab /
+  Shift+Tab** to switch machine, **Enter** to open, **Escape** (or Ctrl-C) to
+  cancel from any state. Cancelling touches nothing.
+- **Current** is the machine running Herdr's server for this window. Its
+  projects are the folders under your configured `roots`/`projects` plus the
+  folders of the workspaces Herdr already has open (a worktree's checkout, or
+  the panes' working directories; never a foreground process's directory).
+- The other tabs are the **enabled saved machines** from Herdr's catalog, in
+  Herdr's order. A machine's tab loads when you first open it (nothing polls)
+  and lists only the folders of workspaces open on that machine, read through
+  Herdr's own `--machine` bridge. Loading, unavailable (with the reason) and
+  empty states are shown; there is never a silent fallback to the local list.
+- **Enter on Current** splits the pane the popup was opened from, with the new
+  shell in the project folder, and moves focus to it.
+- **Enter on another machine** splits that project's own workspace pane on that
+  machine (checked to still exist first) and tells you where it is. It does
+  **not** switch the window: Herdr offers no way for a plugin to do that, so
+  select the machine in the Herdr sidebar to see the new pane.
+- The plugin never types into, restarts or closes an existing pane; it only
+  asks Herdr to create a new one. Remote panes are created unfocused, because
+  focusing is server-wide and would move every other client attached there.
+
+## Limits you should know about
+
+- **The plugin runs on the server of the machine selected when you press the
+  key, and must be installed there.** Herdr does not copy plugins or their
+  config to SSH machines, and this plugin does not install anything remotely.
+- The machine list is the **catalog of that server**, not of the client you are
+  typing in. If you invoke it while a remote machine is selected, you see that
+  server's saved machines. Herdr gives plugins no profile id or name for the
+  machine they run on, so it is shown as the synthetic **Current** tab; the
+  persisted `selected` flag of the catalog is ignored because it does not
+  describe your window.
+- Project folders on other machines are the ones Herdr reports for open
+  workspaces. The plugin does not scan remote disks, and your `roots` apply to
+  the current machine only.
+- Everything is manual: there is no automatic popup for new splits (Herdr's
+  `pane.created` event cannot distinguish a split from a new tab's first pane;
+  see [docs/INTEGRATION.md](docs/INTEGRATION.md)).
 
 ## Requirements
 
-- Herdr 0.9.3 or newer (popup plugin panes).
-- A Rust toolchain with `cargo` to build; no other system tools.
+- Herdr 0.9.3 or newer on every machine you use it on (popup plugin panes;
+  `--machine` routing on the machine you invoke it from).
+- Rust 1.82+ with `cargo` to build; no other tools.
+- Windows, macOS and Linux are declared in the manifest; the manifest commands
+  are the same on all three (Herdr/Windows adds `.exe`).
 
-## Build
+## Install
+
+On each machine whose Herdr server should offer the picker:
 
 ```sh
-cargo build --release --locked
+git clone <repository-url> herdr-project-picker
+cd herdr-project-picker
+cargo build --release --locked --target-dir target
+herdr plugin link "$(pwd)"
 ```
 
-`herdr plugin install` runs this for you (`[[build]]` in the manifest);
-`herdr plugin link` does not, so build first when linking a checkout. The
-manifest runs `target/release/herdr-project-picker` from the plugin folder.
+(`herdr plugin install <repository-url>` runs the same build for you.
+`--target-dir target` keeps the binary where the manifest looks for it even if
+`CARGO_TARGET_DIR` is set. A binary put on `PATH` by `cargo install` is not
+used; the manifest runs `target/release/herdr-project-picker`.)
+
+Then bind the key. `bind-key` appends one `[[keys.command]]` entry to your
+client config after backing it up, and refuses to touch a key that is already
+used or a file that is not valid TOML:
+
+```sh
+target/release/herdr-project-picker bind-key --config /path/to/herdr/config.toml
+# default key prefix+f; --key prefix+g to choose another
+```
+
+The client config is `%APPDATA%\herdr\config.toml` on Windows and
+`~/.config/herdr/config.toml` elsewhere (`XDG_CONFIG_HOME` and
+`HERDR_CONFIG_PATH` override these in the Herdr source this was checked
+against); `herdr config check` validates it. The entry added is:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "local.project-picker.pick"
+description = "Open project"
+```
+
+Keybindings are client-local: reload the client config (or restart the client)
+afterwards.
 
 ## Configure
 
-Create `config.toml` in the plugin config directory
-(`herdr plugin config-dir local.project-picker`):
+Optional `config.toml` in the plugin config directory
+(`herdr plugin config-dir local.project-picker`), see
+[config.example.toml](config.example.toml):
 
 ```toml
 roots = ["~/projects"]   # each subfolder is a project; absolute or ~/...
 projects = []            # folders that are projects themselves
-direction = "right"      # or "down"
-auto_trigger = false     # see docs/INTEGRATION.md before enabling
+direction = "right"      # or "down": where the new pane goes
 ```
 
-`HERDR_PROJECT_PICKER_ROOTS` (a PATH-style list) overrides `roots`, which is
-handy for trying the picker without any config.
-
-Bind the action to a key in your own Herdr config, for example:
-
-```toml
-[[keys.command]]
-key = "prefix+p"
-type = "plugin_action"
-command = "local.project-picker.pick"
-description = "project picker"
-```
+Without any config the picker still lists the folders of your open Herdr
+workspaces. `HERDR_PROJECT_PICKER_ROOTS` (a PATH-style list) overrides `roots`.
+Paths must be absolute because Herdr resolves them in its own process;
+relative entries are rejected with an error.
 
 ## Validation
 
-Nothing below needs Herdr installed, linked or configured.
+None of this installs, links or configures anything.
 
-1. Unit and manifest tests (trigger filtering, config and path handling, safe
-   handoff, search and key handling, manifest/binary contract):
+1. Scoped tests: parsing, filtering, machine cycling, routing and ID
+   isolation, timeouts, sanitization, config preservation, manifest:
    ```sh
-   cargo test
+   cargo test --locked
    ```
-2. See and drive the popup UI on its own, printing the chosen path instead of
-   calling Herdr:
+2. Read-only checks against a running Herdr (catalog, snapshots, destination
+   existence; creates nothing). Add `HERDR_PICKER_LIVE_REMOTE=1` to also read
+   the saved machines through Herdr's non-interactive SSH bridge:
    ```sh
-   HERDR_PROJECT_PICKER_ROOTS=/path/to/projects target/release/herdr-project-picker pick --print
+   cargo test --locked live -- --ignored --nocapture
    ```
+3. See the popup on its own, printing the chosen path instead of opening it:
+   ```sh
+   target/release/herdr-project-picker pick --print
+   ```
+   (Runs `herdr` from `PATH` or `HERDR_BIN_PATH` for the tabs.)
 
-Live check, to be run by you when you want to (it registers the plugin in
-Herdr's user-wide plugin list, so it is deliberately not done by this repo):
-
-```sh
-herdr plugin link /path/to/herdr-project-picker
-herdr plugin action invoke local.project-picker.pick   # popup should open
-# Enter: a new split opens in the project. Escape: nothing changes.
-herdr plugin unlink local.project-picker               # undo
-```
-
-To try the automatic trigger, set `auto_trigger = true`, then create a split,
-a new tab, a new workspace and restart Herdr; the popup should appear only for
-the split. Report any other case: it is the unproven part.
+**Needs a manual live Herdr test** (not done by this repo): the keybinding
+opening the popup centered; Escape closing it with the shell untouched; Enter
+on Current opening a new pane in the project and focusing it; Enter on a saved
+machine creating the pane there and the sidebar switch finding it; a
+disconnected machine showing its error; the same on Windows and on a remote
+machine that has the plugin installed.

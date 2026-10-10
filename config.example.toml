@@ -1,8 +1,13 @@
-# Copy to the plugin config directory as config.toml:
+# Optional. Copy to the plugin config directory as config.toml:
 #   herdr plugin config-dir local.project-picker
+#
+# This file applies to the machine whose Herdr server runs the plugin (the
+# "Current" tab). Other machines' tabs list the folders of the workspaces open
+# there, and need no configuration. Without this file the picker still lists
+# the folders of your open Herdr workspaces.
+#
 # Paths must be absolute or start with "~"; relative paths are rejected because
-# Herdr resolves them in its own process. Nothing is assumed: with no roots or
-# projects the picker just shows where to put this file.
+# Herdr resolves them in its own process.
 
 # Folders whose direct, non-hidden subfolders are listed as projects.
 roots = ["~/projects"]
@@ -10,10 +15,6 @@ roots = ["~/projects"]
 # Folders that are projects themselves.
 projects = []
 
-# Where the manual action opens the project: "right" or "down".
+# Where the new pane goes, beside the one the popup was opened from:
+# "right" or "down".
 direction = "right"
-
-# Opt-in, unproven: also open the picker for new split panes. Off by default
-# because Herdr 0.9.3 cannot say whether a pane was split by the user.
-# See docs/INTEGRATION.md before enabling.
-auto_trigger = false

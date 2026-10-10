@@ -179,6 +179,16 @@ mod tests {
     use super::*;
     use std::fs;
 
+    // The file users are told to copy must load as written.
+    #[test]
+    fn the_documented_example_config_loads() {
+        let example = include_str!("../config.example.toml");
+        let home = abs("home-me");
+        let config = Config::parse(example, Some(&home)).unwrap();
+        assert_eq!(config.roots, [home.join("projects")]);
+        assert_eq!(config.direction, Direction::Right);
+    }
+
     #[test]
     fn empty_config_is_safe_by_default() {
         let config = Config::parse("", None).unwrap();
