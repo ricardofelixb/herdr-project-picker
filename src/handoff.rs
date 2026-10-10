@@ -243,7 +243,11 @@ pub fn open_project(
 
 /// Fails closed unless the destination pane still exists on that machine and
 /// still belongs to the workspace the project was found in.
-fn check_destination(herdr: &dyn Herdr, id: &str, dest: &Destination) -> Result<(), String> {
+pub(crate) fn check_destination(
+    herdr: &dyn Herdr,
+    id: &str,
+    dest: &Destination,
+) -> Result<(), String> {
     let stale = |why: &str| {
         format!(
             "workspace {} is no longer at the saved destination ({why}); reopen the picker",

@@ -266,3 +266,92 @@ mod tests {
         assert!(loaded.note.unwrap().contains("config.toml"));
     }
 }
+
+/// Read-only checks against a running Herdr, for validating by hand:
+/// `cargo test --locked live -- --ignored --nocapture`. Set
+/// `HERDR_PICKER_LIVE_REMOTE=1` to also read each saved machine's snapshot
+/// (Herdr's own non-interactive SSH bridge; nothing is created or changed).
+#[cfg(test)]
+mod live {
+    use super::*;
+    use crate::handoff::{HerdrCli, CALL_TIMEOUT};
+
+    fn herdr() -> HerdrCli {
+        HerdrCli {
+            bin: std::env::var_os("HERDR_BIN_PATH").map_or_else(|| "herdr".into(), Into::into),
+            timeout: CALL_TIMEOUT,
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a running Herdr"]
+    fn live_catalog_and_snapshots_parse() {
+        let herdr = herdr();
+        let json = herdr
+            .run(&routed(None, &["machine", "list", "--json"]))
+            .unwrap();
+        let saved = saved_machines(&json).unwrap();
+        println!(
+            "saved enabled machines: {:?}",
+            saved.iter().map(|m| &m.label).collect::<Vec<_>>()
+        );
+
+        let here = load(
+            &Machine::current(),
+            &herdr,
+            &Config::default(),
+            Path::new("config.toml"),
+        )
+        .unwrap();
+        println!(
+            "Current: {} projects, note {:?}",
+            here.rows.len(),
+            here.note
+        );
+        for row in &here.rows {
+            let dest = row.dest.as_ref().unwrap();
+            assert!(crate::snapshot::is_absolute(&row.path), "{}", row.path);
+            assert!(dest.machine.is_none() && dest.pane_id.contains(':'));
+            println!(
+                "  {} -> pane {} workspace {} ({})",
+                row.path, dest.pane_id, dest.workspace_id, dest.workspace_label
+            );
+        }
+        assert!(
+            !here.rows.is_empty(),
+            "a running Herdr has at least one workspace"
+        );
+
+        if std::env::var_os("HERDR_PICKER_LIVE_REMOTE").is_none() {
+            return;
+        }
+        for machine in saved {
+            match load(
+                &machine,
+                &herdr,
+                &Config::default(),
+                Path::new("config.toml"),
+            ) {
+                Ok(loaded) => {
+                    println!("{}: {} projects", machine.label, loaded.rows.len());
+                    for row in &loaded.rows {
+                        let dest = row.dest.as_ref().unwrap();
+                        assert_eq!(dest.machine, machine.id);
+                        // Read-only (`pane get`): the destination Enter would use.
+                        let id = machine.id.as_deref().unwrap();
+                        crate::handoff::check_destination(&herdr, id, dest).unwrap();
+                        // A real pane id of this machine, asked of the wrong one.
+                        let mut stale = dest.clone();
+                        stale.workspace_id = "w0-not-this-workspace".into();
+                        assert!(crate::handoff::check_destination(&herdr, id, &stale).is_err());
+                        println!(
+                            "  {} ok: destination pane exists in its workspace",
+                            row.name
+                        );
+                    }
+                }
+                Err(err) => println!("{}: unavailable ({err})", machine.label),
+            }
+        }
+    }
+}
