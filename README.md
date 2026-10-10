@@ -2,25 +2,30 @@
 
 A standalone Rust plugin for [Herdr](https://herdr.dev): a centered popup with
 a searchable project list and one tab per Herdr machine. Pick a project and it
-opens in a **new pane** with the shell already in that folder.
+opens as a **new workspace** in Herdr's sidebar, with the shell already in that
+folder.
 
 **Status: working local build for Herdr 0.9.3+.** Parsing of the machine
 catalog and workspace snapshots was checked against a live Herdr (read-only);
-the popup, keybinding and pane creation still need a manual live check, listed
-in [Validation](#validation).
+the popup, keybinding and workspace creation still need a manual live check,
+listed in [Validation](#validation).
 
 ## What it does
 
 Bind it to a key (suggested `prefix+f`). The popup shows:
 
 ```
- Open project                                   3
  Current  Mini  Orgo  MacBook
- > query
- > agents-app           C:\projects\agents-app
-   herdr-project-picker C:\projects\herdr-project-picker
- tab machine  up/down move  enter open  esc cancel
+ › query
+ agents-app  C:\projects\agents-app        <- highlighted
+ herdr-project-picker
+ orchestrator
 ```
+
+Herdr draws the popup's frame and title in its own theme. The inside uses only
+plain terminal attributes (bold, dim, reverse), so it follows the same palette
+as your panes; Herdr does not give plugins its theme colors, and the plugin
+copies none.
 
 - **Type** to filter, **Up/Down** (or Ctrl-N/Ctrl-P) to choose, **Tab /
   Shift+Tab** to switch machine, **Enter** to open, **Escape** (or Ctrl-C) to
@@ -34,15 +39,16 @@ Bind it to a key (suggested `prefix+f`). The popup shows:
   and lists only the folders of workspaces open on that machine, read through
   Herdr's own `--machine` bridge. Loading, unavailable (with the reason) and
   empty states are shown; there is never a silent fallback to the local list.
-- **Enter on Current** splits the pane the popup was opened from, with the new
-  shell in the project folder, and moves focus to it.
-- **Enter on another machine** splits that project's own workspace pane on that
-  machine (checked to still exist first) and tells you where it is. It does
-  **not** switch the window: Herdr offers no way for a plugin to do that, so
-  select the machine in the Herdr sidebar to see the new pane.
+- **Enter on Current** creates a new workspace named after the project, with
+  its shell in the project folder, and switches to it. It always creates a new
+  one, even when the project is already open.
+- **Enter on another machine** creates the workspace on that machine and tells
+  you so. It does **not** switch the window: Herdr offers no way for a plugin
+  to do that, so select it in the Herdr sidebar.
 - The plugin never types into, restarts or closes an existing pane; it only
-  asks Herdr to create a new one. Remote panes are created unfocused, because
-  focusing is server-wide and would move every other client attached there.
+  asks Herdr to create a new workspace. Remote workspaces are created
+  unfocused, because focusing is server-wide and would move every other client
+  attached there.
 
 ## Limits you should know about
 
@@ -120,7 +126,6 @@ Optional `config.toml` in the plugin config directory
 ```toml
 roots = ["~/projects"]   # each subfolder is a project; absolute or ~/...
 projects = []            # folders that are projects themselves
-direction = "right"      # or "down": where the new pane goes
 ```
 
 Without any config the picker still lists the folders of your open Herdr
@@ -137,8 +142,8 @@ None of this installs, links or configures anything.
    ```sh
    cargo test --locked
    ```
-2. Read-only checks against a running Herdr (catalog, snapshots, destination
-   existence; creates nothing). Add `HERDR_PICKER_LIVE_REMOTE=1` to also read
+2. Read-only checks against a running Herdr (catalog and snapshots; creates
+   nothing). Add `HERDR_PICKER_LIVE_REMOTE=1` to also read
    the saved machines through Herdr's non-interactive SSH bridge:
    ```sh
    cargo test --locked live -- --ignored --nocapture
@@ -151,7 +156,7 @@ None of this installs, links or configures anything.
 
 **Needs a manual live Herdr test** (not done by this repo): the keybinding
 opening the popup centered; Escape closing it with the shell untouched; Enter
-on Current opening a new pane in the project and focusing it; Enter on a saved
-machine creating the pane there and the sidebar switch finding it; a
+on Current creating a workspace in the project and switching to it; Enter on a
+saved machine creating the workspace there and the sidebar finding it; a
 disconnected machine showing its error; the same on Windows and on a remote
 machine that has the plugin installed.

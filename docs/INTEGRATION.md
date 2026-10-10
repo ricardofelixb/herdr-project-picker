@@ -56,36 +56,31 @@ allows `api snapshot`) replies `{"result":{"snapshot":{workspaces, panes, tabs,
   the plugin runs on Windows (`Path::is_absolute` would disagree).
 
 `herdr worktree list` is not called: the snapshot already carries the worktree
-checkout of every open workspace, and listing a repository's unopened worktrees
-would produce rows with no destination pane. Snapshots describe open sessions,
+checkout of every open workspace. Snapshots describe open sessions,
 not every project on disk, which is why the current machine also reads the
 configured `roots`; remote disks are not scanned.
 
 ## 3. Opening a project
 
-Herdr cannot change the directory of an existing pane, and typing `cd` into one
-is unsafe (shell-specific quoting, busy shells). So a project is only ever
-opened by creating a **new** pane with `--cwd`; `pane run`, `send-text`,
-`send-keys` and `pane close` are never used, and a test asserts it.
+A project is only ever opened by asking Herdr for a **new** workspace whose
+shell starts in the project: `herdr [--machine <id>] workspace create --cwd
+<project> --label <folder name> --focus|--no-focus`. Existing panes are never
+typed into, restarted or closed (`pane run`, `send-text`, `send-keys`, `pane
+close` and `pane split` are never used, and a test asserts it). It always
+creates a new workspace, even when the project is already open; that was the
+user's choice. Herdr's parser takes the argument after `--cwd`/`--label`
+verbatim (`src/cli/workspace.rs`), so a folder named like an option stays a
+value.
 
-- **Current**: `herdr pane split --pane <popup's pane> --direction <d> --cwd
-  <project> --no-focus`, then `herdr pane focus --direction <d> --pane
-  <popup's pane>`. The CLI focuses only by direction (the socket has
-  `pane.focus` by id, `src/app/api/panes.rs:484`, but no CLI wrapper), so focus
-  moves to the neighbor in the split direction; if that call fails the project
-  is still open.
-- **Saved machine**: `herdr --machine <id> pane get <destination pane>` must
-  show the pane still exists in the workspace the row was found in, otherwise
-  nothing is created ("fail closed"). Then `herdr --machine <id> pane split
-  --pane <destination pane> --direction <d> --cwd <project> --no-focus`. Only
-  ids from that machine's own snapshot are used; a row is refused on any other
-  machine, and a configured/local row is refused on a saved machine, so local
-  ids never reach a remote command. Remote machines are never focused:
-  `pane.focus` and `workspace.focus` are server-wide and would move every other
-  client attached to that server
+- **Current**: created with `--focus`, so the window switches to it.
+- **Saved machine**: routed with `--machine <opaque profile id>` and created
+  with `--no-focus`. A row only opens on the machine it was read from, and a
+  configured/local row is refused on a saved machine. Remote machines are never
+  focused: `pane.focus` and `workspace.focus` are server-wide and would move
+  every other client attached to that server
   (`public_api_focus_replaces_every_client_shell_projection`, installed source).
-  The popup says which machine and workspace got the pane and to select that
-  machine in the sidebar.
+  The popup says which machine got the workspace and to select it in the
+  sidebar.
 - **No client switch.** Switching the invoking window to another machine is an
   internal client action (`ActivateEndpoint`,
   `src/client/shell/endpoint_navigation.rs:228-296`); CLI `--machine` routing is
@@ -109,19 +104,20 @@ Plugin v1 has no native non-terminal UI, so the dialog is a Rust terminal
 program (crossterm, alternate screen) in a `placement = "popup"` pane. Popups
 are session-modal, have no pane id, emit no pane lifecycle events and receive
 all input including Escape (`plugins.mdx`). The popup is opened with `herdr
-plugin pane open` through `HERDR_BIN_PATH`; the pane to open beside is passed as
-`HERDR_PICKER_PANE` because a popup process gets no `HERDR_PANE_ID`. Opening can
+plugin pane open` through `HERDR_BIN_PATH`; its size (56x16 cells, shrunk to fit)
+and title come from the manifest. Opening can
 fail with `ui_busy` when another Herdr modal is active; the error is then only
 in the plugin command log (`herdr plugin log list`). Herdr draws the popup
-border and title; the plugin uses only the terminal's default colors plus
-bold/dim/reverse.
+border and title in its theme. Herdr keeps its theme palette in the client and
+gives panes, popups included, only the host terminal's palette
+(`host_terminal_theme`, `src/app/api/plugins/panes.rs`), so the plugin uses the
+terminal's default colors plus bold/dim/reverse and copies no theme colors.
 
 Threads, no polling: one thread blocks reading the terminal, a worker per
 machine tab loads its projects, a worker performs the open, and the UI loop
 blocks on a single channel they all send to. A slow or hung machine therefore
 only delays its own tab, and Escape works at any time (while an open is in
-flight it stops waiting, but Herdr may still finish the request; the popup says
-so). Every string drawn, including remote labels, paths and error text, is
+flight it stops waiting, but Herdr may still finish the request). Every string drawn, including remote labels, paths and error text, is
 printed with control characters escaped, so a hostile directory name cannot
 rewrite the screen.
 
@@ -176,28 +172,29 @@ supply before the shell starts, would allow an in-place hand-off.
 Checked on this machine (Windows, Herdr `0.9.3-voice-canary.20261006.1`):
 
 - `cargo test --locked`: unit tests for snapshot extraction and merging, machine
-  catalog parsing, tab cycling/filter/load state, `--machine` routing and ID
-  isolation, stale-destination and unreachable-machine handling, bounded
+  catalog parsing, tab cycling/filter/load state, `--machine` routing, rows
+  refused on other machines, unreachable-machine handling, bounded
   subprocess timeout, terminal-control escaping, `bind-key` config
   preservation, and manifest commands.
 - `cargo test --locked live -- --ignored`: read-only against the running
   Herdr: the real `machine list --json` and `api snapshot` of the current
   machine and of every saved machine through `--machine` parse into rows with
-  their own profile ids, `pane get` finds each remote destination in its
-  workspace, and a wrong workspace id is rejected.
+  their own profile ids.
 - `herdr config check`, and the key conflict check before binding.
+- `herdr plugin list --json` shows the edited manifest (title, popup size)
+  without re-linking.
+
+Confirmed live by the user (MacBook client viewing the Windows PC's server):
+`prefix+f` after a client config reload opened the popup, the extensionless
+manifest commands ran on Windows, and Enter opened the project (as a split,
+before the switch to workspaces).
 
 **Unproven, needs a live Herdr:**
 
-1. The popup opening centered from the bound key, with Tab/Shift+Tab, typing,
-   Enter and Escape as the terminal delivers them (including Shift+Tab as
-   `BackTab`).
-2. `pane split --no-focus` followed by `pane focus --direction` from inside a
-   popup on Current; that the unfocused split's neighbor is the new pane.
-3. `--machine <id> pane split` creating the pane on a saved machine, and the
-   sidebar switch finding it.
-4. `--env` reaching the popup process, and extensionless manifest commands on
-   Windows.
-5. Whether `HERDR_BIN_PATH` is always set for popups on remote servers, and the
-   plugin running with a remote server selected (it must be installed there).
-6. Behavior when the client reloads its config after `bind-key`.
+1. `workspace create --focus` from inside the popup on Current, and the
+   compact layout at the 56x16 size.
+2. `--machine <id> workspace create --no-focus` on a saved machine, and the
+   sidebar finding it.
+3. Tab/Shift+Tab as the terminal delivers them (Shift+Tab as `BackTab`).
+4. The plugin running with a remote server selected (it must be installed
+   there).
