@@ -17,6 +17,9 @@ pub struct Config {
     /// Roots on saved machines, keyed by Herdr machine label or profile id,
     /// kept as written: `~` is that machine's home, expanded there.
     pub machines: BTreeMap<String, Vec<String>>,
+    /// The top-level roots a saved machine without its own entry lists: the
+    /// ones written as `~`, `~/...` or `/...`, kept as written.
+    pub shared: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +49,17 @@ struct RawMachine {
 impl Config {
     pub fn parse(text: &str, home: Option<&Path>) -> Result<Config, String> {
         let raw: RawConfig = toml::from_str(text).map_err(|err| err.to_string())?;
-        let expand =
-            |paths: Vec<String>| absolute(paths.iter().map(|p| expand_home(p, home)).collect());
+        // One file can serve every machine: a path that is absolute only on
+        // another system (C:\ on a Mac, / on Windows) is that machine's.
+        let expand = |paths: &[String]| {
+            absolute(
+                paths
+                    .iter()
+                    .map(|p| expand_home(p, home))
+                    .filter(|p| p.is_absolute() || !foreign(p))
+                    .collect(),
+            )
+        };
         let machines = raw
             .machines
             .into_iter()
@@ -62,9 +74,10 @@ impl Config {
             )
             .collect::<Result<_, _>>()?;
         Ok(Config {
-            roots: expand(raw.roots)?,
-            projects: expand(raw.projects)?,
+            roots: expand(&raw.roots)?,
+            projects: expand(&raw.projects)?,
             machines,
+            shared: raw.roots.into_iter().filter(|r| remote_root(r)).collect(),
         })
     }
 
@@ -86,8 +99,32 @@ impl Config {
         if let Some(list) = roots_override {
             config.roots = roots_from_list(list)?;
         }
+        config.roots = config.roots.into_iter().map(canonical).collect();
+        config.projects = config.projects.into_iter().map(canonical).collect();
         Ok(config)
     }
+}
+
+/// The folder as the file system spells it, so `~/projects` on a
+/// case-insensitive Mac matches the `~/Projects` Herdr reports. Windows keeps
+/// the path as written: its canonical form is a `\\?\` path.
+fn canonical(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        return path;
+    }
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+/// Whether `path`, not absolute here, is an absolute path on another system:
+/// it starts with a slash or backslash, or a drive letter and one.
+fn foreign(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    text.starts_with(['/', '\\'])
+        || (bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 /// Splits a PATH-style list of roots.
@@ -241,6 +278,26 @@ mod tests {
         }
         let err = Config::parse(r#"roots = ["projects"]"#, None).unwrap_err();
         assert!(err.contains("projects"), "{err}");
+    }
+
+    // One synced file serves every machine: each skips the other systems' paths
+    // and the saved machines list the Unix-style ones.
+    #[test]
+    fn one_file_serves_every_machine() {
+        let home = abs("home-me");
+        let text = r#"roots = ["C:\\projects", "/srv/code", "~/src", "\\\\host\\share"]"#;
+        let config = Config::parse(text, Some(&home)).unwrap();
+        let mine = if cfg!(windows) {
+            vec![
+                PathBuf::from(r"C:\projects"),
+                home.join("src"),
+                PathBuf::from(r"\\host\share"),
+            ]
+        } else {
+            vec![PathBuf::from("/srv/code"), home.join("src")]
+        };
+        assert_eq!(config.roots, mine);
+        assert_eq!(config.shared, ["/srv/code", "~/src"]);
     }
 
     // Remote roots reach a shell on that machine inside single quotes.

@@ -35,8 +35,9 @@ copies none.
 - The other tabs are the **enabled saved machines** from Herdr's catalog, in
   Herdr's order. A machine's tab loads when you first open it (nothing polls):
   the folders of workspaces open there, read through Herdr's own `--machine`
-  bridge, plus the subfolders of the roots you configure for it, listed
-  read-only over SSH with the target Herdr saved. Loading, unavailable (with
+  bridge, plus the subfolders of your Unix-style roots (or the machine's own
+  `[machines.<name>]` roots), listed read-only over SSH with the target Herdr
+  saved. Loading, unavailable (with
   the reason) and empty states are shown; there is never a silent fallback to
   the local list.
 - A workspace folder that merely contains a configured root (your home
@@ -129,15 +130,20 @@ Optional `config.toml` in the plugin config directory
 [config.example.toml](config.example.toml):
 
 ```toml
-roots = ["~/projects"]   # each subfolder is a project; absolute or ~/...
+# each subfolder is a project; on every machine where the folder exists
+roots = ["C:\\projects", "~/projects", "~/src"]
 projects = []            # folders that are projects themselves
 
-[machines.Mini]          # a saved machine, by its sidebar name
+[machines.Mini]          # optional: a saved machine's own roots, by its sidebar name
 roots = ["~/Projects"]   # listed over SSH; ~ is that machine's home
 ```
 
-Without any config the picker still lists the folders of your open Herdr
-workspaces. `HERDR_PROJECT_PICKER_ROOTS` (a PATH-style list) overrides `roots`.
+The same file can be copied to every machine: each lists the roots that exist
+on it and skips paths that are absolute only on another system, and saved
+machines without their own entry list the `~`, `~/...` and `/...` roots.
+Paths are compared as the file system spells them, so `~/projects` and a
+Mac's `~/Projects` are one folder. Without any config the picker still lists
+the folders of your open Herdr workspaces. `HERDR_PROJECT_PICKER_ROOTS` (a PATH-style list) overrides `roots`.
 Paths must be absolute because Herdr resolves them in its own process;
 relative entries are rejected with an error.
 
