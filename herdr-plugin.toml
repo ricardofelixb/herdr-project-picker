@@ -1,0 +1,33 @@
+id = "local.project-picker"
+name = "Project Picker"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Searchable project picker popup that opens a project in a new split"
+platforms = ["linux", "macos", "windows"]
+
+# Only `plugin install` runs this; with `plugin link`, run it yourself first.
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+# Manual entry point: bind it with a `plugin_action` key (see README).
+[[actions]]
+id = "pick"
+title = "Open project in a new split"
+contexts = ["pane"]
+command = ["target/release/herdr-project-picker", "open"]
+
+# The popup itself, opened by the action or the event hook below.
+[[panes]]
+id = "picker"
+title = "Project picker"
+placement = "popup"
+width = "70%"
+height = "60%"
+command = ["target/release/herdr-project-picker", "pick"]
+
+# Opt-in automation. Herdr cannot tell a split from a new tab's first pane in
+# this event, so the hook exits at once unless `auto_trigger = true` is set in
+# the plugin's config.toml. See docs/INTEGRATION.md.
+[[events]]
+on = "pane.created"
+command = ["target/release/herdr-project-picker", "on-pane-created"]
