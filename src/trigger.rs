@@ -37,13 +37,54 @@ pub enum Skip {
 }
 
 /// Returns the created pane when `event_json` is a `pane_created` envelope.
-pub fn created_pane(_event_json: &str) -> Option<PaneInfo> {
-    todo!()
+pub fn created_pane(event_json: &str) -> Option<PaneInfo> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        event: String,
+        data: Data,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        pane: Option<PaneInfo>,
+    }
+    let envelope: Envelope = serde_json::from_str(event_json).ok()?;
+    if envelope.event != "pane_created" {
+        return None;
+    }
+    envelope.data.pane
 }
 
 /// `tab_panes` is every pane of the workspace, as printed by `pane list`.
-pub fn decide(_created: &PaneInfo, _tab_panes: &[PaneInfo]) -> Decision {
-    todo!()
+pub fn decide(created: &PaneInfo, tab_panes: &[PaneInfo]) -> Decision {
+    if created.label.is_some() {
+        return Decision::Skip(Skip::Labeled);
+    }
+    if created.agent.is_some() {
+        return Decision::Skip(Skip::Agent);
+    }
+    if !created.focused {
+        return Decision::Skip(Skip::Unfocused);
+    }
+    // A tab's first pane has the lowest number in it, even when it is split
+    // before this hook gets to list the panes.
+    let Some(number) = pane_number(&created.pane_id) else {
+        return Decision::Skip(Skip::InitialPane);
+    };
+    let has_older_sibling = tab_panes
+        .iter()
+        .filter(|pane| pane.tab_id == created.tab_id)
+        .filter_map(|pane| pane_number(&pane.pane_id))
+        .any(|other| other < number);
+    if has_older_sibling {
+        Decision::Open
+    } else {
+        Decision::Skip(Skip::InitialPane)
+    }
+}
+
+/// `w1:p12` -> 12.
+fn pane_number(pane_id: &str) -> Option<u64> {
+    pane_id.rsplit(':').next()?.strip_prefix('p')?.parse().ok()
 }
 
 #[cfg(test)]
