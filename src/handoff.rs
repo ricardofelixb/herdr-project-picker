@@ -7,7 +7,9 @@
 //! `--cwd`. No `pane run`, `send-text` or `send-keys` is used anywhere.
 
 use crate::config::Direction;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 pub const PICKER_ENTRYPOINT: &str = "picker";
 pub const ENV_MODE: &str = "HERDR_PICKER_MODE";
@@ -21,8 +23,20 @@ pub trait Herdr {
 pub struct HerdrCli(pub PathBuf);
 
 impl Herdr for HerdrCli {
-    fn run(&self, _args: &[String]) -> Result<String, String> {
-        todo!()
+    fn run(&self, args: &[String]) -> Result<String, String> {
+        let output = Command::new(&self.0)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|err| format!("{}: {err}", self.0.display()))?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = serde_json::from_str::<Value>(stderr.trim())
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(str::to_string));
+        Err(message.unwrap_or_else(|| format!("herdr {}: {}", output.status, stderr.trim())))
     }
 }
 
@@ -42,8 +56,10 @@ impl Mode {
         }
     }
 
-    pub fn parse(_text: &str) -> Option<Mode> {
-        todo!()
+    pub fn parse(text: &str) -> Option<Mode> {
+        [Mode::Split, Mode::Replace]
+            .into_iter()
+            .find(|mode| mode.as_str() == text)
     }
 }
 
@@ -64,23 +80,100 @@ impl std::fmt::Display for HandoffError {
 
 /// Opens the picker popup, remembering the mode and the pane it acts on.
 pub fn open_popup(
-    _herdr: &dyn Herdr,
-    _plugin_id: &str,
-    _mode: Mode,
-    _pane: &str,
+    herdr: &dyn Herdr,
+    plugin_id: &str,
+    mode: Mode,
+    pane: &str,
 ) -> Result<(), String> {
-    todo!()
+    herdr
+        .run(&args(&[
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            plugin_id,
+            "--entrypoint",
+            PICKER_ENTRYPOINT,
+            "--placement",
+            "popup",
+            "--width",
+            "70%",
+            "--height",
+            "60%",
+            "--env",
+            &format!("{ENV_MODE}={}", mode.as_str()),
+            "--env",
+            &format!("{ENV_PANE}={pane}"),
+        ]))
+        .map(drop)
 }
 
 /// Hands `project` to a new shell according to `mode`.
 pub fn open_project(
-    _herdr: &dyn Herdr,
-    _mode: Mode,
-    _pane: &str,
-    _project: &Path,
-    _direction: Direction,
+    herdr: &dyn Herdr,
+    mode: Mode,
+    pane: &str,
+    project: &Path,
+    direction: Direction,
 ) -> Result<(), HandoffError> {
-    todo!()
+    if mode == Mode::Replace {
+        ensure_pristine_shell(herdr, pane)?;
+    }
+    let cwd = project.to_string_lossy();
+    herdr
+        .run(&args(&[
+            "pane",
+            "split",
+            "--pane",
+            pane,
+            "--direction",
+            direction.as_str(),
+            "--cwd",
+            &cwd,
+            "--focus",
+        ]))
+        .map_err(HandoffError::Failed)?;
+    if mode == Mode::Replace {
+        herdr
+            .run(&args(&["pane", "close", pane]))
+            .map_err(HandoffError::Failed)?;
+    }
+    Ok(())
+}
+
+/// A pane may be swapped out only when it is a plain shell sitting idle: no
+/// agent, no plugin label, and the shell itself is the foreground process.
+/// Anything Herdr cannot report counts as not idle.
+fn ensure_pristine_shell(herdr: &dyn Herdr, pane: &str) -> Result<(), HandoffError> {
+    let refuse = |why: &str| HandoffError::Refused(format!("left {pane} alone: {why}"));
+    let query = |command: &[&str]| -> Result<Value, HandoffError> {
+        let out = herdr
+            .run(&args(command))
+            .map_err(|err| refuse(&format!("cannot inspect it ({err})")))?;
+        serde_json::from_str(&out).map_err(|err| refuse(&format!("unreadable reply ({err})")))
+    };
+
+    let info = query(&["pane", "get", pane])?;
+    if !info["result"]["pane"]["agent"].is_null() {
+        return Err(refuse("an agent owns it"));
+    }
+    if !info["result"]["pane"]["label"].is_null() {
+        return Err(refuse("it is a labeled pane"));
+    }
+    let processes = query(&["pane", "process-info", "--pane", pane])?;
+    let process_info = &processes["result"]["process_info"];
+    let shell = process_info["shell_pid"].as_u64();
+    let foreground = process_info["foreground_processes"].as_array();
+    match (shell, foreground) {
+        (Some(shell), Some(list)) if list.len() == 1 && list[0]["pid"].as_u64() == Some(shell) => {
+            Ok(())
+        }
+        _ => Err(refuse("its shell is busy or Herdr cannot tell")),
+    }
+}
+
+fn args(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|part| part.to_string()).collect()
 }
 
 #[cfg(test)]
