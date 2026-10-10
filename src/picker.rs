@@ -272,10 +272,23 @@ fn draw(out: &mut impl Write, state: &State, notice: &str) -> io::Result<()> {
     out.flush()
 }
 
-/// Cuts `text` to `width` characters, marking the cut with an ellipsis.
+/// Makes `text` safe to print and cuts it to `width` characters, marking the
+/// cut with an ellipsis. Control characters (a directory name can hold ESC)
+/// are shown escaped, never sent to the terminal; handoff keeps the real path.
 fn fit(text: &str, width: usize) -> String {
+    let text: String = text
+        .chars()
+        .flat_map(|c| {
+            let shown = if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            };
+            shown.chars().collect::<Vec<_>>()
+        })
+        .collect();
     if text.chars().count() <= width {
-        return text.to_string();
+        return text;
     }
     let kept: String = text.chars().take(width.saturating_sub(1)).collect();
     if width == 0 {
@@ -427,6 +440,18 @@ mod tests {
         );
         assert_eq!(map_key(key(KeyCode::Char('x'), ctrl, Press)), None);
         assert_eq!(map_key(key(KeyCode::F(1), none, Press)), None);
+    }
+
+    // Unix directory names may hold anything but `/` and NUL, including a
+    // literal `ESC[2J` that would clear the popup if printed raw.
+    #[test]
+    fn displayed_text_never_carries_terminal_controls() {
+        let hostile = "evil\u{1b}[2J\u{7}\n\u{9b}name";
+        let shown = fit(hostile, 80);
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert_eq!(shown, "evil\\u{1b}[2J\\u{7}\\n\\u{9b}name");
+        assert_eq!(fit(hostile, 6).chars().count(), 6);
+        assert_eq!(fit("héllo wörld", 80), "héllo wörld");
     }
 
     #[test]
