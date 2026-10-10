@@ -2,7 +2,7 @@ id = "local.project-picker"
 name = "Project Picker"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
-description = "Searchable project picker popup with machine tabs that opens a project in a new pane"
+description = "Searchable project picker popup with machine tabs that opens a project as a new workspace"
 platforms = ["linux", "macos", "windows"]
 
 # `plugin install` runs this; with `plugin link`, run the same command yourself.
@@ -23,8 +23,9 @@ command = ["target/release/herdr-project-picker", "open"]
 # The popup itself, opened by the action above.
 [[panes]]
 id = "picker"
-title = "Project picker"
+title = "Open project"
 placement = "popup"
-width = "70%"
-height = "60%"
+# Terminal cells; Herdr centers the popup and shrinks it to fit small windows.
+width = 56
+height = 16
 command = ["target/release/herdr-project-picker", "pick"]

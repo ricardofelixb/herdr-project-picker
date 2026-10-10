@@ -430,13 +430,14 @@ impl Drop for Screen {
     }
 }
 
-const HINTS: &str = " tab machine  up/down move  enter open  esc cancel";
-
 fn draw(out: &mut impl Write, state: &State) -> io::Result<()> {
     let (width, height) = terminal::size()?;
     render(out, state, width as usize, height as usize)
 }
 
+/// Two header lines (machine tabs, search), then the list or a message. The
+/// popup's frame and title are Herdr's own, and every style here is a plain
+/// terminal attribute, so it follows the same palette as the panes.
 fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> io::Result<()> {
     queue!(out, Clear(ClearType::All))?;
     draw_header(out, state, width)?;
@@ -446,40 +447,24 @@ fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> i
         Phase::Browsing => state.visible(),
         _ => Vec::new(),
     };
-    let top = 3;
-    let body_rows = height.saturating_sub(top + 1);
+    let top = 2;
+    let body_rows = height.saturating_sub(top);
     let (lines, note): (Vec<String>, Option<&str>) = match &state.phase {
-        Phase::Opening(what) => (
-            vec![
-                format!("Opening {what}..."),
-                "Esc stops waiting; Herdr may still finish the request.".into(),
-            ],
-            None,
-        ),
+        Phase::Opening(what) => (vec![format!("Opening {what}…")], None),
         Phase::Done(Ok(text)) => (
             text.lines()
                 .map(str::to_string)
-                .chain(["".into(), "Press Enter to close.".into()])
+                .chain(["Enter to close".into()])
                 .collect(),
             None,
         ),
         Phase::Done(Err(error)) => (
-            vec![
-                format!("Could not open: {error}"),
-                "".into(),
-                "Press Enter to close.".into(),
-            ],
+            vec![format!("Could not open: {error}"), "Enter to close".into()],
             None,
         ),
         Phase::Browsing => match state.body() {
-            Body::Loading(label) => (vec![format!("Loading projects from {label}...")], None),
-            Body::Failed { label, error } => (
-                vec![
-                    format!("{label} unavailable: {error}"),
-                    "Nothing was opened or installed. Tab for another machine.".into(),
-                ],
-                None,
-            ),
+            Body::Loading(label) => (vec![format!("Loading {label}…")], None),
+            Body::Failed { label, error } => (vec![format!("{label} unavailable: {error}")], None),
             Body::Ready { note } if visible.is_empty() => {
                 let text = if state.query().is_empty() {
                     note.unwrap_or("No projects found.")
@@ -503,33 +488,31 @@ fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> i
     let list_rows = body_rows.saturating_sub(note_rows);
     let start = window_start(state.selected(), list_rows, visible.len());
     for (row, project) in visible.iter().skip(start).take(list_rows).enumerate() {
-        let selected = start + row == state.selected();
-        let line = format!(
-            " {} {}  {}",
-            if selected { '>' } else { ' ' },
-            project.name,
-            project.path
-        );
+        let name = fit(&format!(" {}", project.name), width);
         queue!(out, MoveTo(0, (top + row) as u16))?;
-        if selected {
-            queue!(out, SetAttribute(Attribute::Reverse))?;
+        if start + row != state.selected() {
+            queue!(out, Print(name))?;
+            continue;
         }
+        // Only the highlighted row says where it lives, to tell same names apart.
+        let room = width.saturating_sub(name.chars().count());
+        let path = fit(&format!("  {}", project.path), room);
+        let pad = room.saturating_sub(path.chars().count());
         queue!(
             out,
-            Print(format!("{:<width$}", fit(&line, width))),
+            SetAttribute(Attribute::Reverse),
+            Print(name),
+            SetAttribute(Attribute::Dim),
+            Print(format!("{path}{:pad$}", "")),
             SetAttribute(Attribute::Reset)
         )?;
     }
 
     queue!(
         out,
-        MoveTo(0, height.saturating_sub(1) as u16),
-        SetAttribute(Attribute::Dim),
-        Print(fit(HINTS, width)),
-        SetAttribute(Attribute::Reset),
         MoveTo(
-            (4 + state.query().chars().count()).min(width.saturating_sub(1)) as u16,
-            2
+            (3 + state.query().chars().count()).min(width.saturating_sub(1)) as u16,
+            1
         )
     )?;
     out.flush()
@@ -547,19 +530,7 @@ fn put(out: &mut impl Write, row: usize, text: &str, width: usize) -> io::Result
 }
 
 fn draw_header(out: &mut impl Write, state: &State, width: usize) -> io::Result<()> {
-    let count = state.visible().len().to_string();
-    queue!(
-        out,
-        MoveTo(0, 0),
-        SetAttribute(Attribute::Bold),
-        Print(fit(" Open project", width.saturating_sub(count.len() + 2))),
-        SetAttribute(Attribute::Reset),
-        MoveTo(width.saturating_sub(count.len() + 1) as u16, 0),
-        SetAttribute(Attribute::Dim),
-        Print(&count),
-        SetAttribute(Attribute::Reset),
-        MoveTo(0, 1)
-    )?;
+    queue!(out, MoveTo(0, 0))?;
     let labels: Vec<String> = state
         .labels()
         .iter()
@@ -572,7 +543,7 @@ fn draw_header(out: &mut impl Write, state: &State, width: usize) -> io::Result<
         let text = fit(&labels[index], left);
         left = left.saturating_sub(text.chars().count());
         let attr = if index == state.active() {
-            Attribute::Reverse
+            Attribute::Bold
         } else {
             Attribute::Dim
         };
@@ -585,8 +556,8 @@ fn draw_header(out: &mut impl Write, state: &State, width: usize) -> io::Result<
     }
     queue!(
         out,
-        MoveTo(0, 2),
-        Print(fit(&format!(" > {}", state.query()), width))
+        MoveTo(0, 1),
+        Print(fit(&format!(" › {}", state.query()), width))
     )
 }
 
@@ -998,7 +969,7 @@ mod tests {
         ));
         let done = screen(&state);
         assert!(
-            done.contains("Third line") && done.contains("Press Enter"),
+            done.contains("Third line") && done.contains("Enter to close"),
             "{done}"
         );
         assert!(!done.contains("gamma"), "{done}");
