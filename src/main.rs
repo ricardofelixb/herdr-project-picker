@@ -88,7 +88,7 @@ fn load_config() -> Result<Config, String> {
 }
 
 fn open() -> Result<(), String> {
-    handoff::open_popup(&herdr(), &env("HERDR_PLUGIN_ID")?, &env("HERDR_PANE_ID")?)
+    handoff::open_popup(&herdr(), &env("HERDR_PLUGIN_ID")?)
 }
 
 fn bind_key(args: Vec<String>) -> Result<(), String> {
@@ -108,11 +108,6 @@ fn bind_key(args: Vec<String>) -> Result<(), String> {
 }
 
 fn pick(print_only: bool) -> Result<(), String> {
-    let pane = if print_only {
-        String::new()
-    } else {
-        env(handoff::ENV_PANE)?
-    };
     let config = match load_config() {
         Ok(config) => config,
         Err(message) => return pause(&message),
@@ -133,14 +128,13 @@ fn pick(print_only: bool) -> Result<(), String> {
         })
     };
     let open: OpenFn = {
-        let (herdr, machines, direction, chosen) =
-            (herdr.clone(), machines, config.direction, chosen.clone());
+        let (herdr, chosen) = (herdr.clone(), chosen.clone());
         Arc::new(move |tab, row| {
             if print_only {
                 *chosen.lock().unwrap() = Some(row.path);
                 return Ok(None);
             }
-            handoff::open_project(&herdr, &machines[tab], &row, &pane, direction)
+            handoff::open_project(&herdr, &machines[tab], &row)
         })
     };
 

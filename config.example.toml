@@ -14,7 +14,3 @@ roots = ["~/projects"]
 
 # Folders that are projects themselves.
 projects = []
-
-# Where the new pane goes, beside the one the popup was opened from:
-# "right" or "down".
-direction = "right"

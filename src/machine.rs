@@ -244,11 +244,7 @@ mod tests {
             1,
             "configured local roots leaked into a remote tab"
         );
-        let dest = loaded.rows[0].dest.as_ref().unwrap();
-        assert_eq!(
-            (dest.machine.as_deref(), dest.pane_id.as_str()),
-            (Some("prof-b"), "w1:p1")
-        );
+        assert_eq!(loaded.rows[0].machine.as_deref(), Some("prof-b"));
         assert_eq!(loaded.note, None);
     }
 
@@ -298,10 +294,6 @@ mod tests {
             "no --machine for the current machine"
         );
         assert_eq!(loaded.rows.len(), 1, "the same folder must appear once");
-        assert!(
-            loaded.rows[0].dest.is_some(),
-            "the workspace's destination wins over the bare folder"
-        );
         assert_eq!(loaded.note, None);
     }
 
@@ -379,13 +371,9 @@ mod live {
             here.note
         );
         for row in &here.rows {
-            let dest = row.dest.as_ref().unwrap();
             assert!(crate::snapshot::is_absolute(&row.path), "{}", row.path);
-            assert!(dest.machine.is_none() && dest.pane_id.contains(':'));
-            println!(
-                "  {} -> pane {} workspace {} ({})",
-                row.path, dest.pane_id, dest.workspace_id, dest.workspace_label
-            );
+            assert!(row.machine.is_none());
+            println!("  {}", row.path);
         }
         assert!(
             !here.rows.is_empty(),
@@ -405,19 +393,8 @@ mod live {
                 Ok(loaded) => {
                     println!("{}: {} projects", machine.label, loaded.rows.len());
                     for row in &loaded.rows {
-                        let dest = row.dest.as_ref().unwrap();
-                        assert_eq!(dest.machine, machine.id);
-                        // Read-only (`pane get`): the destination Enter would use.
-                        let id = machine.id.as_deref().unwrap();
-                        crate::handoff::check_destination(&herdr, id, dest).unwrap();
-                        // A real pane id of this machine, asked of the wrong one.
-                        let mut stale = dest.clone();
-                        stale.workspace_id = "w0-not-this-workspace".into();
-                        assert!(crate::handoff::check_destination(&herdr, id, &stale).is_err());
-                        println!(
-                            "  {} ok: destination pane exists in its workspace",
-                            row.name
-                        );
+                        assert_eq!(row.machine, machine.id);
+                        println!("  {}", row.path);
                     }
                 }
                 Err(err) => println!("{}: unavailable ({err})", machine.label),

@@ -5,31 +5,21 @@
 
 use serde_json::Value;
 
-/// Where a project opens on its own machine. Pane and workspace ids belong to
-/// one Herdr server, so they travel together with the machine they came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Destination {
-    /// Opaque saved-profile id; `None` is the machine running the plugin.
-    pub machine: Option<String>,
-    pub pane_id: String,
-    pub workspace_id: String,
-    pub workspace_label: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub name: String,
     pub path: String,
-    /// Absent for folders found under the configured roots.
-    pub dest: Option<Destination>,
+    /// Opaque saved-profile id of the machine the folder was found on; `None`
+    /// is the machine running the plugin. A row only ever opens there.
+    pub machine: Option<String>,
 }
 
 impl Row {
-    pub fn new(path: &str, dest: Option<Destination>) -> Row {
+    pub fn new(path: &str, machine: Option<&str>) -> Row {
         Row {
             name: name_of(path),
             path: path.to_string(),
-            dest,
+            machine: machine.map(str::to_string),
         }
     }
 }
@@ -46,8 +36,8 @@ pub fn is_absolute(path: &str) -> bool {
                 && matches!(b[2], b'/' | b'\\')))
 }
 
-/// Herdr ids (`w2G:pD`, profile ids) put into a command line: letters,
-/// digits and `:_.-`, never starting with `-` so they cannot read as options.
+/// Herdr profile ids put into a command line: letters, digits and `:_.-`,
+/// never starting with `-` so they cannot read as options.
 pub fn plain_id(id: &str) -> bool {
     !id.starts_with('-')
         && !id.is_empty()
@@ -85,12 +75,6 @@ fn is_inside(child: &str, parent: &str) -> bool {
     key(child).starts_with(&format!("{}/", key(parent)))
 }
 
-struct Pane<'a> {
-    id: &'a str,
-    cwd: Option<&'a str>,
-    focused: bool,
-}
-
 /// One row per project folder Herdr knows on the machine behind `machine`.
 ///
 /// A workspace's folder is its worktree checkout when it has one, otherwise
@@ -114,31 +98,19 @@ pub fn rows_from_snapshot(reply: &str, machine: Option<&str>) -> Result<Vec<Row>
 
     let mut rows = Vec::new();
     for workspace in workspaces {
-        let Some(workspace_id) = workspace["workspace_id"].as_str().filter(|id| plain_id(id))
-        else {
+        let Some(workspace_id) = workspace["workspace_id"].as_str() else {
             continue;
         };
-        let members: Vec<Pane> = panes
+        let cwds = panes
             .iter()
             .filter(|pane| pane["workspace_id"].as_str() == Some(workspace_id))
-            .filter_map(|pane| {
-                Some(Pane {
-                    id: pane["pane_id"].as_str().filter(|id| plain_id(id))?,
-                    cwd: pane["cwd"].as_str().filter(|cwd| is_absolute(cwd)),
-                    focused: pane["focused"].as_bool().unwrap_or(false),
-                })
-            })
-            .collect();
+            .filter_map(|pane| pane["cwd"].as_str());
 
         let mut folders: Vec<&str> = Vec::new();
         let checkout = workspace["worktree"]["checkout_path"]
             .as_str()
             .filter(|path| is_absolute(path));
-        let candidates = checkout
-            .into_iter()
-            .chain(members.iter().filter_map(|pane| pane.cwd))
-            .filter(|path| is_absolute(path));
-        for path in candidates {
+        for path in checkout.into_iter().chain(cwds).filter(|p| is_absolute(p)) {
             if !folders.iter().any(|seen| key(seen) == key(path)) {
                 folders.push(path);
             }
@@ -146,31 +118,14 @@ pub fn rows_from_snapshot(reply: &str, machine: Option<&str>) -> Result<Vec<Row>
         // Herdr says which folder is the worktree's root, so a pane that sits in
         // one of its parents does not fold it away.
         let is_checkout = |path: &str| checkout.is_some_and(|root| key(root) == key(path));
-        let outer: Vec<&str> = folders
-            .iter()
-            .copied()
-            .filter(|path| is_checkout(path) || !folders.iter().any(|other| is_inside(path, other)))
-            .collect();
-
-        for folder in outer {
-            let at_folder = |pane: &&Pane| pane.cwd.is_some_and(|cwd| key(cwd) == key(folder));
-            let pane = members
+        rows.extend(
+            folders
                 .iter()
-                .filter(at_folder)
-                .find(|pane| pane.focused)
-                .or_else(|| members.iter().find(at_folder))
-                .or_else(|| members.first());
-            let Some(pane) = pane else { continue };
-            rows.push(Row::new(
-                folder,
-                Some(Destination {
-                    machine: machine.map(str::to_string),
-                    pane_id: pane.id.to_string(),
-                    workspace_id: workspace_id.to_string(),
-                    workspace_label: workspace["label"].as_str().unwrap_or(workspace_id).into(),
-                }),
-            ));
-        }
+                .filter(|path| {
+                    is_checkout(path) || !folders.iter().any(|other| is_inside(path, other))
+                })
+                .map(|folder| Row::new(folder, machine)),
+        );
     }
     Ok(rows)
 }
@@ -212,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_keep_the_pane_and_workspace_ids_of_their_own_machine() {
+    fn rows_belong_to_the_machine_they_were_read_from() {
         let found = rows(&reply(
             json!([workspace("w1", "api"), workspace("w2", "web")]),
             json!([
@@ -220,19 +175,11 @@ mod tests {
                 pane("w2:p1", "w2", "/srv/web")
             ]),
         ));
-        let dest = |pane_id: &str, workspace_id: &str, label: &str| {
-            Some(Destination {
-                machine: Some("profile-a".into()),
-                pane_id: pane_id.into(),
-                workspace_id: workspace_id.into(),
-                workspace_label: label.into(),
-            })
-        };
         assert_eq!(
             found,
             [
-                Row::new("/srv/api", dest("w1:p1", "w1", "api")),
-                Row::new("/srv/web", dest("w2:p1", "w2", "web")),
+                Row::new("/srv/api", Some("profile-a")),
+                Row::new("/srv/web", Some("profile-a")),
             ]
         );
         assert_eq!(found[0].name, "api");
@@ -243,7 +190,7 @@ mod tests {
             ),
             None,
         );
-        assert_eq!(local.unwrap()[0].dest.as_ref().unwrap().machine, None);
+        assert_eq!(local.unwrap()[0].machine, None);
     }
 
     #[test]
@@ -267,7 +214,6 @@ mod tests {
         ));
         let paths: Vec<&str> = found.iter().map(|row| row.path.as_str()).collect();
         assert_eq!(paths, ["/p/app", "/p/app/tools"]);
-        assert_eq!(found[0].dest.as_ref().unwrap().pane_id, "w1:p2");
     }
 
     #[test]
@@ -282,7 +228,6 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, "/w/app-feature");
         assert_eq!(found[0].name, "app-feature");
-        assert_eq!(found[0].dest.as_ref().unwrap().pane_id, "w1:p1");
     }
 
     // A pane that wandered above the checkout must not hide the checkout.
@@ -299,20 +244,6 @@ mod tests {
         ));
         let paths: Vec<_> = found.iter().map(|row| row.path.as_str()).collect();
         assert_eq!(paths, ["/home/me/app-feature", "/home/me"]); // by name
-        for row in &found {
-            assert_eq!(row.dest.as_ref().unwrap().workspace_id, "w1");
-        }
-    }
-
-    #[test]
-    fn the_focused_pane_at_the_root_is_the_destination() {
-        let mut focused = pane("w1:p2", "w1", "/p/app");
-        focused["focused"] = json!(true);
-        let found = rows(&reply(
-            json!([workspace("w1", "app")]),
-            json!([pane("w1:p1", "w1", "/p/app"), focused]),
-        ));
-        assert_eq!(found[0].dest.as_ref().unwrap().pane_id, "w1:p2");
     }
 
     #[test]
@@ -342,7 +273,6 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, "C:\\Projects\\App");
         assert_eq!(found[0].name, "App");
-        assert_eq!(found[0].dest.as_ref().unwrap().workspace_id, "w1");
     }
 
     #[test]
@@ -353,19 +283,6 @@ mod tests {
         noisy["agent"] = json!("SECRET-AGENT");
         let found = rows(&reply(json!([workspace("w1", "api")]), json!([noisy])));
         assert!(!format!("{found:?}").contains("SECRET"));
-    }
-
-    // Ids go into Herdr's argv: one that looks like an option must not get there.
-    #[test]
-    fn ids_that_could_pass_as_options_or_controls_are_dropped() {
-        for bad in ["--focus", "-x", "w1:p1 --focus", "w1\u{1b}[2J", ""] {
-            let found = rows(&reply(
-                json!([workspace("w1", "a"), workspace(bad, "b")]),
-                json!([pane(bad, "w1", "/p/a"), pane("w2:p1", bad, "/p/b")]),
-            ));
-            assert!(found.is_empty(), "{bad:?} -> {found:?}");
-        }
-        assert!(plain_id("w2G:pD") && plain_id("c39b980d85c5a201b99110267d1d4e92"));
     }
 
     #[test]
@@ -383,20 +300,14 @@ mod tests {
 
     #[test]
     fn merge_drops_repeats_first_wins_and_sorts_by_name() {
-        let on_pane = Some(Destination {
-            machine: None,
-            pane_id: "w1:p1".into(),
-            workspace_id: "w1".into(),
-            workspace_label: "zed".into(),
-        });
         let merged = merge(vec![
-            Row::new("/p/zed", on_pane.clone()),
+            Row::new("/p/zed", Some("first")),
             Row::new("/p/Alpha", None),
-            Row::new("/p/zed/", None),
+            Row::new("/p/zed/", Some("second")),
             Row::new("/q/alpha", None),
         ]);
         let paths: Vec<&str> = merged.iter().map(|row| row.path.as_str()).collect();
         assert_eq!(paths, ["/p/Alpha", "/q/alpha", "/p/zed"]);
-        assert_eq!(merged[2].dest, on_pane);
+        assert_eq!(merged[2].machine.as_deref(), Some("first"));
     }
 }

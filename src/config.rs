@@ -7,30 +7,12 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "config.toml";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Direction {
-    #[default]
-    Right,
-    Down,
-}
-
-impl Direction {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Direction::Right => "right",
-            Direction::Down => "down",
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Folders whose direct, non-hidden subfolders are projects.
     pub roots: Vec<PathBuf>,
     /// Folders that are projects themselves.
     pub projects: Vec<PathBuf>,
-    pub direction: Direction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +28,6 @@ struct RawConfig {
     roots: Vec<String>,
     #[serde(default)]
     projects: Vec<String>,
-    #[serde(default)]
-    direction: Direction,
 }
 
 impl Config {
@@ -58,7 +38,6 @@ impl Config {
         Ok(Config {
             roots: expand(raw.roots)?,
             projects: expand(raw.projects)?,
-            direction: raw.direction,
         })
     }
 
@@ -186,14 +165,12 @@ mod tests {
         let home = abs("home-me");
         let config = Config::parse(example, Some(&home)).unwrap();
         assert_eq!(config.roots, [home.join("projects")]);
-        assert_eq!(config.direction, Direction::Right);
     }
 
     #[test]
     fn empty_config_is_safe_by_default() {
         let config = Config::parse("", None).unwrap();
         assert!(config.roots.is_empty() && config.projects.is_empty());
-        assert_eq!(config.direction, Direction::Right);
     }
 
     /// A path that is absolute on the platform running the tests.
@@ -235,10 +212,7 @@ mod tests {
     #[test]
     fn typos_and_bad_values_are_reported() {
         assert!(Config::parse("rots = []", None).is_err());
-        assert!(Config::parse(r#"direction = "left""#, None).is_err());
         assert!(Config::parse(r#"roots = "not-a-list""#, None).is_err());
-        let config = Config::parse("direction = \"down\"", None).unwrap();
-        assert_eq!(config.direction, Direction::Down);
     }
 
     #[test]
@@ -271,7 +245,6 @@ mod tests {
         let config = Config {
             roots: vec![root.0.clone(), root.0.join("missing")],
             projects: vec![root.0.join("beta"), root.0.join("also-missing")],
-            ..Config::default()
         };
         let names: Vec<_> = discover(&config).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Alpha", "beta"]);
