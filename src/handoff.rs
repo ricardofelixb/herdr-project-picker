@@ -187,20 +187,7 @@ pub fn open_project(
     let direction_arg = direction.as_str();
     match plan(machine, row, invoking_pane)? {
         Plan::Local { pane } => {
-            herdr.run(&routed(
-                None,
-                &[
-                    "pane",
-                    "split",
-                    "--pane",
-                    pane,
-                    "--direction",
-                    direction_arg,
-                    "--cwd",
-                    &row.path,
-                    "--no-focus",
-                ],
-            ))?;
+            split(herdr, None, pane, direction_arg, &row.path)?;
             // Cosmetic, hence best effort: the project is already open.
             let _ = herdr.run(&routed(
                 None,
@@ -217,20 +204,7 @@ pub fn open_project(
         }
         Plan::Remote { id, dest } => {
             check_destination(herdr, id, dest)?;
-            herdr.run(&routed(
-                Some(id),
-                &[
-                    "pane",
-                    "split",
-                    "--pane",
-                    &dest.pane_id,
-                    "--direction",
-                    direction_arg,
-                    "--cwd",
-                    &row.path,
-                    "--no-focus",
-                ],
-            ))?;
+            split(herdr, Some(id), &dest.pane_id, direction_arg, &row.path)?;
             Ok(Some(format!(
                 "Opened {} in a new pane on {}, workspace {} ({}).\n\
                  Herdr cannot switch this window to another machine:\n\
@@ -239,6 +213,28 @@ pub fn open_project(
             )))
         }
     }
+}
+
+/// A new, unfocused pane beside `pane` with its shell in `cwd`.
+fn split(
+    herdr: &dyn Herdr,
+    machine: Option<&str>,
+    pane: &str,
+    direction: &str,
+    cwd: &str,
+) -> Result<String, String> {
+    let args = [
+        "pane",
+        "split",
+        "--pane",
+        pane,
+        "--direction",
+        direction,
+        "--cwd",
+        cwd,
+        "--no-focus",
+    ];
+    herdr.run(&routed(machine, &args))
 }
 
 /// Fails closed unless the destination pane still exists on that machine and

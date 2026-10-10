@@ -46,6 +46,16 @@ pub fn is_absolute(path: &str) -> bool {
                 && matches!(b[2], b'/' | b'\\')))
 }
 
+/// Herdr ids (`w2G:pD`, profile ids) put into a command line: letters,
+/// digits and `:_.-`, never starting with `-` so they cannot read as options.
+pub fn plain_id(id: &str) -> bool {
+    !id.starts_with('-')
+        && !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '-'))
+}
+
 fn windows_style(path: &str) -> bool {
     path.starts_with("\\\\") || path.as_bytes().get(1) == Some(&b':')
 }
@@ -104,7 +114,8 @@ pub fn rows_from_snapshot(reply: &str, machine: Option<&str>) -> Result<Vec<Row>
 
     let mut rows = Vec::new();
     for workspace in workspaces {
-        let Some(workspace_id) = workspace["workspace_id"].as_str() else {
+        let Some(workspace_id) = workspace["workspace_id"].as_str().filter(|id| plain_id(id))
+        else {
             continue;
         };
         let members: Vec<Pane> = panes
@@ -112,7 +123,7 @@ pub fn rows_from_snapshot(reply: &str, machine: Option<&str>) -> Result<Vec<Row>
             .filter(|pane| pane["workspace_id"].as_str() == Some(workspace_id))
             .filter_map(|pane| {
                 Some(Pane {
-                    id: pane["pane_id"].as_str()?,
+                    id: pane["pane_id"].as_str().filter(|id| plain_id(id))?,
                     cwd: pane["cwd"].as_str().filter(|cwd| is_absolute(cwd)),
                     focused: pane["focused"].as_bool().unwrap_or(false),
                 })
@@ -318,6 +329,19 @@ mod tests {
         noisy["agent"] = json!("SECRET-AGENT");
         let found = rows(&reply(json!([workspace("w1", "api")]), json!([noisy])));
         assert!(!format!("{found:?}").contains("SECRET"));
+    }
+
+    // Ids go into Herdr's argv: one that looks like an option must not get there.
+    #[test]
+    fn ids_that_could_pass_as_options_or_controls_are_dropped() {
+        for bad in ["--focus", "-x", "w1:p1 --focus", "w1\u{1b}[2J", ""] {
+            let found = rows(&reply(
+                json!([workspace("w1", "a"), workspace(bad, "b")]),
+                json!([pane(bad, "w1", "/p/a"), pane("w2:p1", bad, "/p/b")]),
+            ));
+            assert!(found.is_empty(), "{bad:?} -> {found:?}");
+        }
+        assert!(plain_id("w2G:pD") && plain_id("c39b980d85c5a201b99110267d1d4e92"));
     }
 
     #[test]

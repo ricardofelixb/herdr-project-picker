@@ -14,8 +14,8 @@ mod picker;
 mod snapshot;
 
 use config::{Config, CONFIG_FILE};
-use handoff::{Herdr, HerdrCli};
-use machine::{Loaded, Machine};
+use handoff::HerdrCli;
+
 use picker::{Finish, LoadFn, OpenFn};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -107,23 +107,6 @@ fn bind_key(args: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// The current machine, then the enabled saved ones in Herdr's order. The
-/// catalog is the one of the server running this plugin; when it cannot be
-/// read, only the current machine is offered, with the reason.
-fn machines(herdr: &dyn Herdr) -> (Vec<Machine>, Option<String>) {
-    let mut machines = vec![Machine::current()];
-    let catalog = herdr
-        .run(&handoff::routed(None, &["machine", "list", "--json"]))
-        .and_then(|json| machine::saved_machines(&json));
-    match catalog {
-        Ok(saved) => {
-            machines.extend(saved);
-            (machines, None)
-        }
-        Err(err) => (machines, Some(format!("Saved machines unavailable: {err}"))),
-    }
-}
-
 fn pick(print_only: bool) -> Result<(), String> {
     let pane = if print_only {
         String::new()
@@ -136,24 +119,17 @@ fn pick(print_only: bool) -> Result<(), String> {
     };
     let config_file = config_dir().map_or(CONFIG_FILE.into(), |dir| dir.join(CONFIG_FILE));
     let herdr = herdr();
-    let (machines, catalog_warning) = machines(&herdr);
+    let (machines, catalog_warning) = machine::available(&herdr);
     let labels = machines.iter().map(|m| m.label.clone()).collect();
     let chosen = Arc::new(Mutex::new(None));
 
     let load: LoadFn = {
         let (herdr, machines, config) = (herdr.clone(), machines.clone(), config.clone());
         Arc::new(move |tab| {
-            let mut loaded = machine::load(&machines[tab], &herdr, &config, &config_file)?;
-            if let (0, Some(warning)) = (tab, &catalog_warning) {
-                loaded = Loaded {
-                    note: Some(match loaded.note {
-                        Some(note) => format!("{warning}\n{note}"),
-                        None => warning.clone(),
-                    }),
-                    ..loaded
-                };
-            }
-            Ok(loaded)
+            let loaded = machine::load(&machines[tab], &herdr, &config, &config_file)?;
+            // The catalog problem belongs to the current machine's tab.
+            let warning = catalog_warning.as_deref().filter(|_| tab == 0);
+            Ok(loaded.with_warning(warning))
         })
     };
     let open: OpenFn = {

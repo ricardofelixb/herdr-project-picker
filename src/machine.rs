@@ -3,7 +3,7 @@
 
 use crate::config::{discover, Config};
 use crate::handoff::{routed, Herdr};
-use crate::snapshot::{merge, rows_from_snapshot, Row};
+use crate::snapshot::{merge, plain_id, rows_from_snapshot, Row};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -44,12 +44,29 @@ pub fn saved_machines(json: &str) -> Result<Vec<Machine>, String> {
         serde_json::from_str(json).map_err(|err| format!("unreadable machine list: {err}"))?;
     Ok(profiles
         .into_iter()
-        .filter(|profile| profile.enabled && !profile.id.is_empty())
+        .filter(|profile| profile.enabled && plain_id(&profile.id))
         .map(|profile| Machine {
             id: Some(profile.id),
             label: profile.label,
         })
         .collect())
+}
+
+/// The current machine, then the enabled saved ones in Herdr's order. The
+/// catalog is the one of the server running this plugin; when it cannot be
+/// read only the current machine is offered, with the reason.
+pub fn available(herdr: &dyn Herdr) -> (Vec<Machine>, Option<String>) {
+    let mut machines = vec![Machine::current()];
+    let catalog = herdr
+        .run(&routed(None, &["machine", "list", "--json"]))
+        .and_then(|json| saved_machines(&json));
+    match catalog {
+        Ok(saved) => {
+            machines.extend(saved);
+            (machines, None)
+        }
+        Err(err) => (machines, Some(format!("Saved machines unavailable: {err}"))),
+    }
 }
 
 /// What one machine's tab shows.
@@ -58,6 +75,21 @@ pub struct Loaded {
     pub rows: Vec<Row>,
     /// Said instead of an empty list, or under a list that is incomplete.
     pub note: Option<String>,
+}
+
+impl Loaded {
+    /// Puts `warning` first in the note, keeping what the note already said.
+    pub fn with_warning(self, warning: Option<&str>) -> Loaded {
+        let Some(warning) = warning else { return self };
+        let note = match self.note {
+            Some(note) => format!("{warning}\n{note}"),
+            None => warning.to_string(),
+        };
+        Loaded {
+            note: Some(note),
+            ..self
+        }
+    }
 }
 
 /// Reads one machine's projects, once, when its tab is first shown.
@@ -138,11 +170,49 @@ mod tests {
 
     #[test]
     fn unusable_catalog_entries_and_output_are_not_guessed_at() {
-        let json = r#"[{"id":"","label":"Blank","enabled":true},{"id":"a1","label":"NoFlag"}]"#;
+        let json = r#"[{"id":"","label":"Blank","enabled":true},{"id":"a1","label":"NoFlag"},
+            {"id":"--focus","label":"Option","enabled":true}]"#;
         assert!(saved_machines(json).unwrap().is_empty());
         assert!(saved_machines("[]").unwrap().is_empty());
         assert!(saved_machines("No saved SSH machines.").is_err());
         assert!(saved_machines(r#"{"error":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn the_current_machine_comes_first_and_an_unreadable_catalog_says_why() {
+        let json = r#"[{"id":"a1","label":"Mini","enabled":true},{"id":"b2","label":"Orgo","enabled":true}]"#;
+        let mock = Mock::default().reply("machine list --json", Ok(json));
+        let (machines, warning) = available(&mock);
+        let labels: Vec<_> = machines.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Current", "Mini", "Orgo"]);
+        assert_eq!((machines[0].id.as_deref(), warning), (None, None));
+        assert_eq!(mock.joined(), ["machine list --json"]);
+
+        let broken = Mock::default().reply("machine list", Err("herdr: not found"));
+        let (machines, warning) = available(&broken);
+        assert_eq!(machines, [Machine::current()]);
+        assert!(warning.unwrap().contains("herdr: not found"));
+    }
+
+    #[test]
+    fn a_warning_leads_the_note_without_hiding_the_projects() {
+        let loaded = || Loaded {
+            rows: vec![Row::new("/p/a", None)],
+            note: None,
+        };
+        assert_eq!(loaded().with_warning(None), loaded());
+        let warned = loaded().with_warning(Some("Saved machines unavailable: x"));
+        assert_eq!(warned.rows, loaded().rows);
+        assert_eq!(
+            warned.note.as_deref(),
+            Some("Saved machines unavailable: x")
+        );
+        let both = Loaded {
+            rows: vec![],
+            note: Some("No projects found.".into()),
+        }
+        .with_warning(Some("W"));
+        assert_eq!(both.note.as_deref(), Some("W\nNo projects found."));
     }
 
     fn snapshot(cwd: &str) -> String {
