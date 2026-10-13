@@ -134,7 +134,7 @@ Plugin v1 has no native non-terminal UI, so the dialog is a Rust terminal
 program (crossterm, alternate screen) in a `placement = "popup"` pane. Popups
 are session-modal, have no pane id, emit no pane lifecycle events and receive
 all input including Escape (`plugins.mdx`). The popup is opened with `herdr
-plugin pane open` through `HERDR_BIN_PATH`; its size (36x14 cells, shrunk to fit)
+plugin pane open` through `HERDR_BIN_PATH`; its size (76x20 cells, shrunk to fit)
 and title come from the manifest. Opening can
 fail with `ui_busy` when another Herdr modal is active; the error is then only
 in the plugin command log (`herdr plugin log list`). Herdr draws the popup
@@ -221,7 +221,7 @@ before the switch to workspaces).
 **Unproven, needs a live Herdr:**
 
 1. `workspace create --focus` from inside the popup on Current, and the
-   compact layout at the 36x14 size.
+   compact layout at the 76x20 size.
 2. `--machine <id> workspace create --focus` and the toast on a saved machine, and the
    sidebar finding it.
 3. Tab/Shift+Tab as the terminal delivers them (Shift+Tab as `BackTab`).

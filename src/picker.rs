@@ -4,7 +4,10 @@
 use crate::machine::Loaded;
 use crate::snapshot::Row;
 use crossterm::cursor::MoveTo;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
@@ -142,6 +145,25 @@ impl State {
             Key::Esc => return Outcome::Cancel,
         }
         Outcome::Continue
+    }
+
+    /// A click does what its key would: a tab switches machine, a project row
+    /// opens that project, the buttons open or close.
+    pub fn click(&mut self, hit: Hit) -> Outcome {
+        let browsing = matches!(self.phase, Phase::Browsing);
+        match hit {
+            Hit::Open => self.handle(Key::Enter),
+            Hit::Close => self.handle(Key::Esc),
+            Hit::Tab(tab) if browsing => {
+                self.switch(tab);
+                Outcome::Continue
+            }
+            Hit::Row(row) if browsing && row < self.matches.len() => {
+                self.selected = row;
+                self.handle(Key::Enter)
+            }
+            _ => Outcome::Continue,
+        }
     }
 
     fn only_escape(key: Key) -> Outcome {
@@ -296,6 +318,28 @@ pub fn map_key(event: KeyEvent) -> Option<Key> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Mouse {
+    /// A left click at a column and row.
+    Click(usize, usize),
+    ScrollUp,
+    ScrollDown,
+}
+
+/// Maps a terminal mouse event: left clicks and the wheel. Moves, drags,
+/// releases and other buttons do nothing.
+pub fn map_mouse(event: MouseEvent) -> Option<Mouse> {
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => Some(Mouse::Click(
+            usize::from(event.column),
+            usize::from(event.row),
+        )),
+        MouseEventKind::ScrollUp => Some(Mouse::ScrollUp),
+        MouseEventKind::ScrollDown => Some(Mouse::ScrollDown),
+        _ => None,
+    }
+}
+
 /// First row of a `rows`-tall window over `len` items that keeps `selected` in view.
 pub fn window_start(selected: usize, rows: usize, len: usize) -> usize {
     if rows == 0 || len <= rows {
@@ -339,6 +383,7 @@ pub type OpenFn = Arc<dyn Fn(usize, Row) -> Result<(), String> + Send + Sync>;
 
 enum Msg {
     Key(Key),
+    Mouse(Mouse),
     Redraw,
     Loaded(usize, Result<Loaded, String>),
     Opened(Result<(), String>),
@@ -362,23 +407,39 @@ pub fn run(labels: Vec<String>, load: LoadFn, open: OpenFn) -> io::Result<Finish
             });
         }
         draw(&mut out, &state)?;
-        match rx.recv() {
-            Ok(Msg::Key(key)) => match state.handle(key) {
-                Outcome::Continue => {}
-                Outcome::Cancel => return Ok(finish(&state)),
-                Outcome::Choose { tab, row } => {
-                    let (open, tx) = (open.clone(), tx.clone());
-                    std::thread::spawn(move || {
-                        let _ = tx.send(Msg::Opened(open(tab, row)));
-                    });
+        let outcome = match rx.recv() {
+            Ok(Msg::Key(key)) => state.handle(key),
+            Ok(Msg::Mouse(Mouse::ScrollUp)) => state.handle(Key::Up),
+            Ok(Msg::Mouse(Mouse::ScrollDown)) => state.handle(Key::Down),
+            Ok(Msg::Mouse(Mouse::Click(column, row))) => {
+                let (width, height) = terminal::size()?;
+                match Layout::new(&state, width as usize, height as usize).hit(column, row) {
+                    Some(hit) => state.click(hit),
+                    None => Outcome::Continue,
                 }
-            },
-            Ok(Msg::Loaded(tab, result)) => state.finish_load(tab, result),
+            }
+            Ok(Msg::Loaded(tab, result)) => {
+                state.finish_load(tab, result);
+                Outcome::Continue
+            }
             Ok(Msg::Opened(Ok(()))) => return Ok(Finish::Opened),
-            Ok(Msg::Opened(Err(error))) => state.open_failed(error),
-            Ok(Msg::Redraw) => {}
+            Ok(Msg::Opened(Err(error))) => {
+                state.open_failed(error);
+                Outcome::Continue
+            }
+            Ok(Msg::Redraw) => Outcome::Continue,
             Ok(Msg::InputFailed(error)) => return Err(io::Error::other(error)),
             Err(_) => return Ok(Finish::Cancelled),
+        };
+        match outcome {
+            Outcome::Continue => {}
+            Outcome::Cancel => return Ok(finish(&state)),
+            Outcome::Choose { tab, row } => {
+                let (open, tx) = (open.clone(), tx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Opened(open(tab, row)));
+                });
+            }
         }
     }
 }
@@ -395,6 +456,7 @@ fn spawn_input(tx: Sender<Msg>) {
     std::thread::spawn(move || loop {
         let msg = match event::read() {
             Ok(Event::Key(event)) => map_key(event).map(Msg::Key),
+            Ok(Event::Mouse(event)) => map_mouse(event).map(Msg::Mouse),
             Ok(Event::Resize(..)) => Some(Msg::Redraw),
             Ok(_) => None,
             Err(error) => {
@@ -410,21 +472,21 @@ fn spawn_input(tx: Sender<Msg>) {
     });
 }
 
-/// Raw mode on the alternate screen, restored on drop.
+/// Raw mode on the alternate screen with mouse reporting, restored on drop.
 struct Screen;
 
 impl Screen {
     fn enter() -> io::Result<Screen> {
         terminal::enable_raw_mode()?;
         let screen = Screen;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         Ok(screen)
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -434,20 +496,157 @@ fn draw(out: &mut impl Write, state: &State) -> io::Result<()> {
     render(out, state, width as usize, height as usize)
 }
 
-/// Two header lines (machine tabs, search), then the list or a message. The
-/// popup's frame and title are Herdr's own, and every style here is a plain
+// The dialog's rows, laid out like Herdr's own dialogs: machine tabs, a rule,
+// the search, a blank row, the list, then key hints and buttons at the bottom.
+const TABS_ROW: usize = 0;
+const RULE_ROW: usize = 1;
+const SEARCH_ROW: usize = 2;
+const LIST_TOP: usize = 4;
+/// Text starts one column in; the rule and the selection bar span the width.
+const MARGIN: usize = 1;
+const OPEN: &str = " ↵ open ";
+const CLOSE: &str = " esc close ";
+const BUTTON_GAP: usize = 3;
+
+/// What a click landed on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Hit {
+    Tab(usize),
+    /// A row of the visible list, counted from its first match.
+    Row(usize),
+    Open,
+    Close,
+}
+
+/// Where each part of the dialog goes at one terminal size. Drawing and clicks
+/// both read it, so a click always means what is on screen.
+struct Layout {
+    /// The tabs drawn: index, first column, text.
+    tabs: Vec<(usize, usize, String)>,
+    /// The rows between the search and the footer: messages, projects, a note.
+    body: Range<usize>,
+    /// How many body rows hold projects, and the first project shown.
+    rows: usize,
+    start: usize,
+    /// The hints and buttons rows, when the dialog is tall enough for them.
+    footer: Option<(usize, usize)>,
+    open: Option<Range<usize>>,
+    close: Range<usize>,
+}
+
+impl Layout {
+    fn new(state: &State, width: usize, height: usize) -> Layout {
+        let footer = (height >= LIST_TOP + 4).then(|| (height - 2, height - 1));
+        let end = footer.map_or(height, |(hints, _)| hints - 1);
+        let body = LIST_TOP.min(end)..end;
+        let browsing = matches!(state.phase, Phase::Browsing);
+        let len = if browsing { state.visible().len() } else { 0 };
+        let note = len > 0 && matches!(state.body(), Body::Ready { note: Some(_) });
+        let rows = body.len().saturating_sub(usize::from(note));
+        let (open, close) = buttons(browsing, width);
+        Layout {
+            tabs: tabs(state, width),
+            start: window_start(state.selected(), rows, len),
+            body,
+            rows,
+            footer,
+            open,
+            close,
+        }
+    }
+
+    fn hit(&self, column: usize, row: usize) -> Option<Hit> {
+        if row == TABS_ROW {
+            return (self.tabs.iter())
+                .find(|(_, x, text)| (*x..x + text.chars().count()).contains(&column))
+                .map(|(tab, ..)| Hit::Tab(*tab));
+        }
+        if (self.body.start..self.body.start + self.rows).contains(&row) {
+            return Some(Hit::Row(self.start + row - self.body.start));
+        }
+        if self.footer.is_some_and(|(_, buttons)| buttons == row) {
+            if self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.contains(&column))
+            {
+                return Some(Hit::Open);
+            }
+            if self.close.contains(&column) {
+                return Some(Hit::Close);
+            }
+        }
+        None
+    }
+}
+
+/// The machine tabs that fit, the active one always, each followed by a gap.
+fn tabs(state: &State, width: usize) -> Vec<(usize, usize, String)> {
+    let labels: Vec<String> = (state.labels().iter())
+        .map(|label| format!(" {} ", sanitize(label)))
+        .collect();
+    let widths: Vec<usize> = labels
+        .iter()
+        .map(|label| label.chars().count() + 1)
+        .collect();
+    let mut x = MARGIN;
+    let mut drawn = Vec::new();
+    for index in tab_window(&widths, state.active(), width.saturating_sub(MARGIN)) {
+        let text = fit(&labels[index], width.saturating_sub(x));
+        if text.is_empty() {
+            break;
+        }
+        let next = x + text.chars().count() + 1;
+        drawn.push((index, x, text));
+        x = next;
+    }
+    drawn
+}
+
+/// The columns of the open and close buttons, centered. Only browsing can open.
+fn buttons(browsing: bool, width: usize) -> (Option<Range<usize>>, Range<usize>) {
+    let (open, close) = (OPEN.chars().count(), CLOSE.chars().count());
+    if browsing {
+        let x = width.saturating_sub(open + BUTTON_GAP + close) / 2;
+        let close_x = x + open + BUTTON_GAP;
+        (Some(x..x + open), close_x..close_x + close)
+    } else {
+        let x = width.saturating_sub(close) / 2;
+        (None, x..x + close)
+    }
+}
+
+/// The popup's frame and title are Herdr's own, and every style here is a plain
 /// terminal attribute, so it follows the same palette as the panes.
 fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> io::Result<()> {
+    let layout = Layout::new(state, width, height);
     queue!(out, Clear(ClearType::All))?;
-    draw_header(out, state, width)?;
+    for (index, x, text) in &layout.tabs {
+        let style: &[Attribute] = if *index == state.active() {
+            &[Attribute::Reverse, Attribute::Bold]
+        } else {
+            &[Attribute::Dim]
+        };
+        at(out, *x, TABS_ROW, text, style)?;
+    }
+    at(out, 0, RULE_ROW, &"─".repeat(width), &[Attribute::Dim])?;
+    let search = fit(
+        &format!("› {}", state.query()),
+        width.saturating_sub(MARGIN),
+    );
+    at(out, MARGIN, SEARCH_ROW, &search, &[])?;
+    if state.query().is_empty() {
+        let hint = fit("search", width.saturating_sub(MARGIN + 2));
+        at(out, MARGIN + 2, SEARCH_ROW, &hint, &[Attribute::Dim])?;
+    }
 
     // Only the browsing screen has a list; the other phases own the whole body.
-    let visible = match state.phase {
-        Phase::Browsing => state.visible(),
-        _ => Vec::new(),
+    let browsing = matches!(state.phase, Phase::Browsing);
+    let visible = if browsing {
+        state.visible()
+    } else {
+        Vec::new()
     };
-    let top = 2;
-    let body_rows = height.saturating_sub(top);
     let (lines, note): (Vec<String>, Option<&str>) = match &state.phase {
         Phase::Opening(what) => (vec![format!("Opening {what}…")], None),
         Phase::Failed(error) => (
@@ -468,81 +667,81 @@ fn render(out: &mut impl Write, state: &State, width: usize, height: usize) -> i
             Body::Ready { note } => (Vec::new(), note),
         },
     };
-    for (row, line) in lines.iter().take(body_rows).enumerate() {
-        put(out, top + row, line, width)?;
+    for (row, line) in lines.iter().take(layout.body.len()).enumerate() {
+        put(out, layout.body.start + row, line, width)?;
     }
-    let note_rows = usize::from(note.is_some());
-    if let Some(note) = note {
-        let first = note.lines().next().unwrap_or_default();
-        put(out, top + body_rows.saturating_sub(1), first, width)?;
+    if let (Some(note), Some(last)) = (note, layout.body.clone().last()) {
+        put(out, last, note.lines().next().unwrap_or_default(), width)?;
     }
 
-    let list_rows = body_rows.saturating_sub(note_rows);
-    let start = window_start(state.selected(), list_rows, visible.len());
-    for (row, project) in visible.iter().skip(start).take(list_rows).enumerate() {
-        let name = fit(&format!(" {}", project.name), width);
-        queue!(out, MoveTo(0, (top + row) as u16))?;
-        if start + row == state.selected() {
-            queue!(out, SetAttribute(Attribute::Reverse))?;
+    for (row, project) in visible
+        .iter()
+        .skip(layout.start)
+        .take(layout.rows)
+        .enumerate()
+    {
+        let y = layout.body.start + row;
+        if layout.start + row == state.selected() {
+            let line = fit(&format!(" ▸ {}", project.name), width);
+            let bar = format!("{line:<width$}");
+            at(out, 0, y, &bar, &[Attribute::Reverse, Attribute::Bold])?;
+        } else {
+            at(out, 0, y, &fit(&format!("   {}", project.name), width), &[])?;
         }
-        queue!(
-            out,
-            Print(format!("{name:<width$}")),
-            SetAttribute(Attribute::Reset)
-        )?;
     }
 
+    if let Some((hints, buttons)) = layout.footer {
+        if browsing {
+            let tab = if state.labels().len() > 1 {
+                "  tab machine"
+            } else {
+                ""
+            };
+            put(
+                out,
+                hints,
+                &format!("↑↓ select{tab}  type to search"),
+                width,
+            )?;
+        }
+        if let Some(open) = &layout.open {
+            let text = fit(OPEN, width.saturating_sub(open.start));
+            at(
+                out,
+                open.start,
+                buttons,
+                &text,
+                &[Attribute::Reverse, Attribute::Bold],
+            )?;
+        }
+        let text = fit(CLOSE, width.saturating_sub(layout.close.start));
+        at(out, layout.close.start, buttons, &text, &[Attribute::Bold])?;
+    }
+
+    let cursor = MARGIN + 2 + state.query().chars().count();
     queue!(
         out,
         MoveTo(
-            (3 + state.query().chars().count()).min(width.saturating_sub(1)) as u16,
-            1
+            cursor.min(width.saturating_sub(1)) as u16,
+            SEARCH_ROW as u16
         )
     )?;
     out.flush()
 }
 
-/// One dim, indented line of messages.
-fn put(out: &mut impl Write, row: usize, text: &str, width: usize) -> io::Result<()> {
-    queue!(
-        out,
-        MoveTo(1, row as u16),
-        SetAttribute(Attribute::Dim),
-        Print(fit(text, width.saturating_sub(2))),
-        SetAttribute(Attribute::Reset)
-    )
+/// `text`, already made safe with `fit`, at a column and row in `style`.
+fn at(out: &mut impl Write, x: usize, y: usize, text: &str, style: &[Attribute]) -> io::Result<()> {
+    queue!(out, MoveTo(x as u16, y as u16))?;
+    for &attribute in style {
+        queue!(out, SetAttribute(attribute))?;
+    }
+    queue!(out, Print(text), SetAttribute(Attribute::Reset))
 }
 
-fn draw_header(out: &mut impl Write, state: &State, width: usize) -> io::Result<()> {
-    queue!(out, MoveTo(0, 0))?;
-    let labels: Vec<String> = state
-        .labels()
-        .iter()
-        .map(|label| format!(" {} ", sanitize(label)))
-        .collect();
-    let widths: Vec<usize> = labels.iter().map(|label| label.chars().count()).collect();
-    let shown = tab_window(&widths, state.active(), width);
-    let mut left = width;
-    for index in shown {
-        let text = fit(&labels[index], left);
-        left = left.saturating_sub(text.chars().count());
-        let attr = if index == state.active() {
-            Attribute::Bold
-        } else {
-            Attribute::Dim
-        };
-        queue!(
-            out,
-            SetAttribute(attr),
-            Print(text),
-            SetAttribute(Attribute::Reset)
-        )?;
-    }
-    queue!(
-        out,
-        MoveTo(0, 1),
-        Print(fit(&format!(" › {}", state.query()), width))
-    )
+/// One dim, indented line of messages.
+fn put(out: &mut impl Write, row: usize, text: &str, width: usize) -> io::Result<()> {
+    let text = fit(text, width.saturating_sub(2 * MARGIN));
+    at(out, MARGIN, row, &text, &[Attribute::Dim])
 }
 
 /// Shows control characters (a directory name or a remote label can hold ESC)
@@ -950,6 +1149,112 @@ mod tests {
         assert!(failed.contains("no such folder"), "{failed}");
         assert!(failed.contains("Enter to close"), "{failed}");
         assert!(!failed.contains("gamma"), "{failed}");
+    }
+
+    #[test]
+    fn clicking_a_project_opens_it_and_a_tab_switches_machine() {
+        let mut s = machines();
+        assert_eq!(
+            s.click(Hit::Row(2)),
+            Outcome::Choose {
+                tab: 0,
+                row: row("gamma", "/clients/acme")
+            }
+        );
+        assert_eq!(s.click(Hit::Row(1)), Outcome::Continue, "already opening");
+
+        let mut s = machines();
+        assert_eq!(s.click(Hit::Row(9)), Outcome::Continue, "below the list");
+        assert_eq!(s.click(Hit::Tab(2)), Outcome::Continue);
+        assert_eq!(s.active(), 2);
+        assert_eq!(s.click(Hit::Close), Outcome::Cancel);
+    }
+
+    #[test]
+    fn the_open_button_opens_the_highlighted_project() {
+        let mut s = state();
+        s.handle(Key::Down);
+        assert_eq!(
+            s.click(Hit::Open),
+            Outcome::Choose {
+                tab: 0,
+                row: row("beta-tools", "/work")
+            }
+        );
+    }
+
+    // Clicks are read against the same layout that is drawn.
+    #[test]
+    fn clicks_land_on_what_is_drawn() {
+        let mut s = machines();
+        let layout = Layout::new(&s, 80, 12);
+        // " Current " from column 1, a gap, then " Mini ".
+        assert_eq!(layout.hit(1, TABS_ROW), Some(Hit::Tab(0)));
+        assert_eq!(layout.hit(10, TABS_ROW), None, "the gap");
+        assert_eq!(layout.hit(11, TABS_ROW), Some(Hit::Tab(1)));
+        assert_eq!(layout.hit(30, SEARCH_ROW), None);
+        assert_eq!(layout.hit(40, LIST_TOP + 1), Some(Hit::Row(1)));
+        let open = layout.open.clone().unwrap();
+        assert_eq!(layout.hit(open.start, 11), Some(Hit::Open));
+        assert_eq!(layout.hit(layout.close.start, 11), Some(Hit::Close));
+        assert_eq!(layout.hit(open.end, 11), None, "between the buttons");
+
+        // Scrolled down, the first row on screen is the window's first match.
+        for _ in 0..3 {
+            s.handle(Key::Down);
+        }
+        let short = Layout::new(&s, 80, 9);
+        assert_eq!(short.rows, 2);
+        assert_eq!(short.hit(5, LIST_TOP), Some(Hit::Row(2)));
+    }
+
+    #[test]
+    fn the_dialog_draws_herdrs_dialog_parts() {
+        let mut s = machines();
+        s.handle(Key::Down);
+        let shown = screen(&s);
+        for part in [
+            "▸ beta-tools",
+            "───",
+            "↑↓ select  tab machine",
+            "↵ open",
+            "esc close",
+        ] {
+            assert!(shown.contains(part), "{part}: {shown}");
+        }
+        assert!(
+            !screen(&state()).contains("tab machine"),
+            "one machine, no tabs to switch"
+        );
+    }
+
+    #[test]
+    fn the_mouse_maps_left_clicks_and_the_wheel_only() {
+        let event = |kind| MouseEvent {
+            kind,
+            column: 7,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        let left = MouseButton::Left;
+        assert_eq!(
+            map_mouse(event(MouseEventKind::Down(left))),
+            Some(Mouse::Click(7, 3))
+        );
+        assert_eq!(
+            map_mouse(event(MouseEventKind::ScrollDown)),
+            Some(Mouse::ScrollDown)
+        );
+        assert_eq!(
+            map_mouse(event(MouseEventKind::ScrollUp)),
+            Some(Mouse::ScrollUp)
+        );
+        assert_eq!(map_mouse(event(MouseEventKind::Up(left))), None);
+        assert_eq!(map_mouse(event(MouseEventKind::Moved)), None);
+        assert_eq!(
+            map_mouse(event(MouseEventKind::Down(MouseButton::Right))),
+            None
+        );
     }
 
     // Names only: the list shows no folder paths.

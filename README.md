@@ -14,20 +14,28 @@ Bind it to a key (suggested `prefix+f`). The popup shows:
 
 ```
  Current  Mini  Orgo  MacBook
+────────────────────────────────────
  › query
- agents-app                    <- highlighted
- herdr-project-picker
- orchestrator
+
+ ▸ agents-app                       <- highlighted
+   herdr-project-picker
+   orchestrator
+
+ ↑↓ select  tab machine  type to search
+           ↵ open    esc close
 ```
 
 Herdr draws the popup's frame and title in its own theme. The inside uses only
-plain terminal attributes (bold, dim, reverse), so it follows the same palette
+plain terminal attributes (bold, dim, reverse), laid out like Herdr's own
+dialogs (settings), so it follows the same palette
 as your panes; Herdr does not give plugins its theme colors, and the plugin
 copies none.
 
 - **Type** to filter, **Up/Down** (or Ctrl-N/Ctrl-P) to choose, **Tab /
   Shift+Tab** to switch machine, **Enter** to open, **Escape** (or Ctrl-C) to
   cancel from any state. Cancelling touches nothing.
+- **Mouse:** click a project to open it, a tab to switch machine, or the
+  `↵ open` / `esc close` buttons; the wheel moves the highlight.
 - **Current** is the machine running Herdr's server for this window. Its
   projects are the folders under your configured `roots`/`projects` plus the
   folders of the workspaces Herdr already has open (a worktree's checkout, or
@@ -174,7 +182,8 @@ None of this installs, links or configures anything.
 
 **Needs a manual live Herdr test** (not done by this repo): the keybinding
 opening the popup centered; Escape closing it with the shell untouched; Enter
-on Current creating a workspace in the project and switching to it; Enter on a
+on Current creating a workspace in the project and switching to it; a
+click on a project, a tab and each button; Enter on a
 saved machine creating the workspace there and the sidebar finding it; a
 disconnected machine showing its error; the same on Windows and on a remote
 machine that has the plugin installed.
