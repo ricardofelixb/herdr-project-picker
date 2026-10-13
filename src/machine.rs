@@ -104,9 +104,10 @@ impl Loaded {
 
 /// Reads one machine's projects, once, when its tab is first shown.
 ///
-/// Every machine lists the folders of its open Herdr workspaces, minus the
-/// ones that hold a configured root (a home folder is not a project), plus the
-/// subfolders of its configured roots. The current machine reads its roots
+/// Every machine lists the folders of its open Herdr workspaces plus the
+/// subfolders of its configured roots, minus the folders that hold a
+/// configured root: a home folder, or a root nested in another (`forks` under
+/// `~/Projects`), is not a project. The current machine reads its roots
 /// itself and keeps them if Herdr cannot be asked. A saved machine is asked
 /// through Herdr's own `--machine` bridge, and its configured roots are listed
 /// read-only over SSH; a failed bridge is an error, never a quiet fallback to
@@ -130,8 +131,8 @@ pub fn load(
         if !roots.is_empty() {
             match list_remote(herdr, machine, roots) {
                 Ok((expanded, found)) => {
-                    rows.retain(|row| !expanded.iter().any(|root| holds(&row.path, root)));
                     rows.extend(found.iter().map(|path| Row::new(path, Some(id))));
+                    rows.retain(|row| !expanded.iter().any(|root| holds(&row.path, root)));
                 }
                 Err(err) => note = Some(format!("Could not list {}: {err}", roots.join(", "))),
             }
@@ -153,14 +154,14 @@ pub fn load(
             Some(format!("Herdr workspaces unavailable: {err}")),
         ),
     };
-    let roots: Vec<&str> = config.roots.iter().filter_map(|r| r.to_str()).collect();
-    rows.retain(|row| !roots.iter().any(|root| holds(&row.path, root)));
     rows.extend(
         discover(config)
             .iter()
             .filter_map(|project| project.path.to_str())
             .map(|path| Row::new(path, None)),
     );
+    let roots: Vec<&str> = config.roots.iter().filter_map(|r| r.to_str()).collect();
+    rows.retain(|row| !roots.iter().any(|root| holds(&row.path, root)));
     let rows = merge(rows);
     if rows.is_empty() && note.is_none() {
         note = Some(format!(
@@ -434,6 +435,24 @@ mod tests {
         let loaded = load(&machine, &mock, &here(), Path::new("config.toml")).unwrap();
         assert!(loaded.rows.is_empty());
         assert!(loaded.note.unwrap().contains("Orgo"));
+    }
+
+    // A root nested in another, like ~/Projects/forks under ~/Projects, lists
+    // its own subfolders; the folder itself is not a project.
+    #[test]
+    fn a_root_nested_in_another_is_not_listed_as_a_project() {
+        let listing = "root\t/root/src\ndir\t/root/src/app\ndir\t/root/src/forks\n\
+                       root\t/root/src/forks\ndir\t/root/src/forks/lib\n";
+        let mock = Mock::default()
+            .reply(
+                "--machine prof-b api snapshot",
+                Ok(&snapshot("/root/src/forks")),
+            )
+            .reply("ssh orgo", Ok(listing));
+        let config = with_roots(&["~/src", "~/src/forks"]);
+        let loaded = load(&orgo(), &mock, &config, Path::new("config.toml")).unwrap();
+        let names: Vec<_> = loaded.rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["app", "lib"]);
     }
 
     #[test]
