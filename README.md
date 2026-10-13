@@ -46,10 +46,13 @@ copies none.
   its shell in the project folder, and switches to it. It always creates a new
   one, even when the project is already open.
 - **Enter on another machine** creates the workspace there and makes it that
-  machine's active workspace, closes the popup and shows a Herdr toast. It
-  cannot switch your window to that machine (Herdr offers plugins no way to),
-  so click the machine in the sidebar and you land on the new workspace.
-  Focus is per server, so other windows showing that machine follow it.
+  machine's active workspace, then closes the popup. If your window carries
+  [Touchline's window patch](https://github.com/ricardofelixb/touchline#herdrs-window-patch),
+  it switches to that machine and shows the new workspace, as clicking it in
+  the sidebar would. Stock Herdr offers plugins no way to switch your window,
+  so it shows a Herdr toast instead: click the machine in the sidebar and you
+  land on the new workspace. Focus is per server, so other windows showing
+  that machine follow it.
 - The plugin never types into, restarts or closes an existing pane; it only
   asks Herdr to create a new workspace.
 

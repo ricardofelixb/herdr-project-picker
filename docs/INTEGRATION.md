@@ -111,6 +111,12 @@ value.
   command-scoped, "never the runtime or TUI" (`src/cli/target.rs:7-9`). That is
   the smallest upstream gap: a public request that switches the calling client's
   machine and/or reports the caller's current profile id in the plugin context.
+  Until then, a window built with Touchline's local patch listens on
+  `herdr-window.sock` beside `HERDR_SOCKET_PATH`: the picker reads the new
+  workspace id from `workspace create`'s answer and sends
+  `{"method":"window.focus","params":{"machine":<profile id>,"workspace_id":...}}`.
+  The window handles it as a sidebar click. With no such socket, or any error,
+  the toast above is shown instead.
 - Paths are passed to Herdr's server process, so they must be absolute
   (checked on the plugin side, platform-independently).
 - Escape exits without any Herdr call.
