@@ -29,6 +29,10 @@ pub trait Herdr {
     fn run(&self, args: &[String]) -> Result<String, String>;
     /// Runs `command` on a saved machine through OpenSSH, never prompting.
     fn ssh(&self, target: &str, command: &str) -> Result<String, String>;
+    /// Asks the Herdr window on this computer to show `workspace_id` on the
+    /// saved machine `machine`, as clicking it in the sidebar would. Stock
+    /// Herdr has no way to; this needs a window patched to listen for it.
+    fn show(&self, machine: &str, workspace_id: &str) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -55,6 +59,40 @@ impl Herdr for HerdrCli {
         let args: Vec<String> = args.map(String::from).to_vec();
         run_bounded(Path::new("ssh"), &args, self.timeout)
     }
+
+    fn show(&self, machine: &str, workspace_id: &str) -> Result<(), String> {
+        let api = std::env::var_os("HERDR_SOCKET_PATH").ok_or("HERDR_SOCKET_PATH is not set")?;
+        let window = Path::new(&api).with_file_name("herdr-window.sock");
+        let request = serde_json::json!({
+            "id": "project-picker",
+            "method": "window.focus",
+            "params": {"machine": machine, "workspace_id": workspace_id},
+        });
+        ask_window(&window, &request.to_string(), self.timeout)
+    }
+}
+
+#[cfg(unix)]
+fn ask_window(socket: &Path, request: &str, timeout: Duration) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    writeln!(stream, "{request}").map_err(|e| e.to_string())?;
+    let mut reply = String::new();
+    BufReader::new(stream)
+        .read_line(&mut reply)
+        .map_err(|e| e.to_string())?;
+    let reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
+    match reply.get("error") {
+        None => Ok(()),
+        Some(error) => Err(error["message"].as_str().unwrap_or("error").to_string()),
+    }
+}
+
+#[cfg(not(unix))]
+fn ask_window(_: &Path, _: &str, _: Duration) -> Result<(), String> {
+    Err("no window socket on this platform".into())
 }
 
 /// Runs a program to completion, or kills it once `timeout` has passed. The
@@ -141,9 +179,10 @@ pub fn open_popup(herdr: &dyn Herdr, plugin_id: &str) -> Result<(), String> {
 /// Opens `row` as a new, focused workspace named after the project, with its
 /// shell in the project folder, on the machine the row was found on.
 ///
-/// Herdr cannot switch this window to another machine, so for a saved machine
-/// the workspace becomes the one shown there (focus is per server: other
-/// windows on that machine follow) and a Herdr toast says where it went.
+/// For a saved machine the workspace becomes the one shown there (focus is per
+/// server: other windows on that machine follow), and this computer's window
+/// is asked to show it. Stock Herdr cannot do that, so a Herdr toast then says
+/// where it went.
 pub fn open_project(herdr: &dyn Herdr, machine: &Machine, row: &Row) -> Result<(), String> {
     if !is_absolute(&row.path) {
         return Err(format!("{} is not an absolute path", row.path));
@@ -163,8 +202,14 @@ pub fn open_project(herdr: &dyn Herdr, machine: &Machine, row: &Row) -> Result<(
         &row.name,
         "--focus",
     ];
-    herdr.run(&routed(machine.id.as_deref(), &args))?;
-    if machine.id.is_some() {
+    let created = herdr.run(&routed(machine.id.as_deref(), &args))?;
+    if let Some(id) = machine.id.as_deref() {
+        let shown = created_workspace(&created)
+            .ok_or_else(|| "no workspace id in Herdr's answer".to_string())
+            .and_then(|workspace| herdr.show(id, &workspace));
+        if shown.is_ok() {
+            return Ok(());
+        }
         // Cosmetic, hence best effort: the workspace already exists.
         let title = format!("Opened {} on {}", row.name, machine.label);
         let body = format!("Select {} in the sidebar.", machine.label);
@@ -172,6 +217,13 @@ pub fn open_project(herdr: &dyn Herdr, machine: &Machine, row: &Row) -> Result<(
         let _ = herdr.run(&routed(None, &toast));
     }
     Ok(())
+}
+
+/// The new workspace's id, from `workspace create`'s JSON answer.
+fn created_workspace(answer: &str) -> Option<String> {
+    let answer: Value = serde_json::from_str(answer).ok()?;
+    let id = answer.pointer("/result/workspace/workspace_id")?.as_str()?;
+    Some(id.to_string())
 }
 
 /// A scripted stand-in for the Herdr CLI, shared by the tests of the modules
@@ -218,6 +270,12 @@ pub mod mock {
         /// Recorded as `ssh <target> <command>`.
         fn ssh(&self, target: &str, command: &str) -> Result<String, String> {
             self.run(&["ssh".into(), target.into(), command.into()])
+        }
+
+        /// Recorded as `window.focus <machine> <workspace>`.
+        fn show(&self, machine: &str, workspace_id: &str) -> Result<(), String> {
+            let args = ["window.focus".into(), machine.into(), workspace_id.into()];
+            self.run(&args).map(drop)
         }
     }
 }
@@ -300,8 +358,24 @@ mod tests {
         assert_eq!(done, Err("no such folder".to_string()));
     }
 
-    // Herdr cannot switch this window to another machine: the workspace is
-    // focused there, and a toast on this machine says where it went.
+    // A patched window switches to the machine and shows the new workspace.
+    #[test]
+    fn remote_project_is_shown_in_this_window_when_it_can_switch() {
+        let created = r#"{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"wC"}}}"#;
+        let mock = Mock::default().reply("--machine prof-b workspace create", Ok(created));
+        let row = Row::new("/srv/api", Some("prof-b"));
+        open_project(&mock, &remote("prof-b"), &row).unwrap();
+        assert_eq!(
+            mock.joined(),
+            [
+                "--machine prof-b workspace create --cwd /srv/api --label api --focus",
+                "window.focus prof-b wC",
+            ]
+        );
+    }
+
+    // Stock Herdr cannot switch this window to another machine: the workspace
+    // is focused there, and a toast on this machine says where it went.
     #[test]
     fn remote_project_is_routed_by_profile_id_focused_there_and_announced_here() {
         let mock = Mock::default();
